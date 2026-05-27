@@ -44,8 +44,14 @@ def main(cfg: TrainConfig):
         if os.path.isdir(cfg.checkpoint):
             state_dict = get_fp32_state_dict_from_zero_checkpoint(cfg.checkpoint)
         else:
-            state_dict = torch.load(cfg.checkpoint, map_location="cpu")
-        model.load_state_dict(state_dict)
+            ckpt = torch.load(cfg.checkpoint, map_location="cpu")
+            # Lightning saves full checkpoint; extract state_dict if present
+            state_dict = ckpt['state_dict'] if 'state_dict' in ckpt else ckpt
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        if missing:
+            print(f"[checkpoint] Missing keys (will use random init): {missing}")
+        if unexpected:
+            print(f"[checkpoint] Unexpected keys (ignored): {unexpected}")
 
         
     # print config
@@ -59,21 +65,14 @@ def main(cfg: TrainConfig):
     setup_logging(cfg)
 
     # resume training
-    resume_path = cfg.resume_path
+    resume_path = None
     resume_wandb = False
 
     # if folder for this experiment does not exist set resume to true
     # to create necessary folders to resume wandb logging later
-    if not os.path.exists(resume_path):
-        resume_wandb = True
-    elif os.path.exists(resume_path) and cfg.resume:
-        resume_wandb = True
-
-    if os.path.exists(resume_path) and cfg.resume:
-        resume_path = resume_path
-    else:
-        resume_path = None
-
+    resume_path = cfg.resume_path if cfg.resume_path is not None else ""
+    resume_wandb = cfg.resume and os.path.exists(resume_path)
+    resume_path = resume_path if resume_wandb else None
     # setup lightning logger
     loggers = []
     # csvlogger = CSVLogger("log/", "CSVLogger")
@@ -129,6 +128,8 @@ def main(cfg: TrainConfig):
             callbacks=callbacks,
             devices=cfg.gpus,
             # enable_checkpointing=False,
+            accumulate_grad_batches=cfg.accumulate_grad_batches,
+            num_sanity_val_steps=0,
             gradient_clip_val=1.0,
             log_every_n_steps=20,
             logger=loggers,

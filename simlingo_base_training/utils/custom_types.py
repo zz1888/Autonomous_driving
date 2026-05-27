@@ -37,7 +37,9 @@ class DrivingLabel(NamedTuple):
     time_delta_sec: Tensor  # [B, F] 0-2 sec
     waypoints: Tensor  # [B, F, 2] 11 future waypoints 0.2s apart
     waypoints_1d: Tensor  # [B, F, 2] 11 future waypoints 0.2s apart
-    route_adjusted: Tensor 
+    route_adjusted: Tensor
+    target_speed: Optional[Tensor] = None  # [B] float32, m/s
+    angle: Optional[Tensor] = None  # [B] float32, radians
 
 class DrivingExample(NamedTuple):
     driving_input: DrivingInput

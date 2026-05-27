@@ -4,12 +4,14 @@ defaults:
   - /model/vision_model: llavanext
 
 model:
-  lr: 3e-5
-  vision_lr: 3e-5
+  lr: 1e-5
+  vision_lr: 1e-5
   predict_route_as_wps: True
-  speed_wps_mode: '2d'
+  speed_wps_mode: '1d'
+  predict_control: True
+  scheduler_type: cosine
   language_model:
-    variant: tiny
+    variant: x-small
     lora: False
     _target_: simlingo_base_training.models.language_model.llama.Llama
   vision_model:
@@ -18,10 +20,10 @@ model:
 data_module:
   data_path: database/simlingo
   bucket_path: database/bucketsv2_simlingo
-  batch_size: 28
+  batch_size: 42
   num_workers: 10
   route_as: target_point
-  hist_len: 1
+  hist_len: 2
   cut_bottom_quarter: False
   use_global_img: False
 
@@ -30,11 +32,12 @@ data_module:
   img_shift_augmentation_prob: 0.5
   image_enhancing: True
 
-max_epochs: 30
+max_epochs: 10
 seed: 42
-gpus: 8
-val_every_n_epochs: 2
-name: simlingo_base_seed_42
+gpus: 1
+val_every_n_epochs: 1
+name: simlingo_base_seed_42_finetune_10ep_1e-5_cosine
+checkpoint: /home/mediacore/simlingo/outputs/2026_05_13_13_24_08_simlingo_base_seed_42/checkpoints/last.ckpt
 
 hydra:
   run:

@@ -27,7 +27,7 @@ from srunner.scenariomanager.carla_data_provider import *
 from srunner.scenariomanager.timer import GameTime
 from srunner.scenariomanager.watchdog import Watchdog
 
-from leaderboard.scenarios.scenario_manager import ScenarioManager
+from leaderboard.scenarios.scenario_manager_local import ScenarioManager
 from leaderboard.scenarios.route_scenario import RouteScenario
 from leaderboard.envs.sensor_interface import SensorConfigurationInvalid
 from leaderboard.autoagents.agent_wrapper import AgentError, validate_sensor_configuration
@@ -53,7 +53,7 @@ class LeaderboardEvaluator(object):
 
     # Tunable parameters
     client_timeout = 10.0  # in seconds
-    frame_rate = 20.0      # in Hz
+    frame_rate = 60.0      # in Hz
 
     def __init__(self, args, statistics_manager):
         """
@@ -175,7 +175,7 @@ class LeaderboardEvaluator(object):
             synchronous_mode = True,
             fixed_delta_seconds = 1.0 / self.frame_rate,
             deterministic_ragdolls = True,
-            spectator_as_ego = False
+            spectator_as_ego = True
         )
         client.get_world().apply_settings(settings)
 

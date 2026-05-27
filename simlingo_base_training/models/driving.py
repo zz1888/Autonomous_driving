@@ -4,7 +4,6 @@ from typing import Optional, Tuple
 
 import pytorch_lightning as pl
 import torch
-from deepspeed.ops.adam import FusedAdam
 from torch import Tensor, nn
 from torchvision.models import ResNet18_Weights, resnet18
 
@@ -54,7 +53,10 @@ class DrivingModel(pl.LightningModule):
         new_layer_norm_minmax=False,
         predict_route_as_wps=False,
         speed_wps_mode=False,
+        predict_control=False,
+        scheduler_type: str = "onecycle",
         variant=None,
+        **kwargs
     ):
         super().__init__()
 
@@ -72,14 +74,24 @@ class DrivingModel(pl.LightningModule):
         self.new_layer_norm_minmax = new_layer_norm_minmax
         self.predict_route_as_wps = predict_route_as_wps
         self.speed_wps_mode = speed_wps_mode
+        self.predict_control = predict_control
+        self.scheduler_type = scheduler_type
+
+        self.loss_weights = {
+            "route_loss": 1.0,
+            "speed_wps_loss": 1.0,
+            "target_speed_loss": 1.0,
+            "angle_loss": 1.0,
+        }
 
         self.all_predictions = {}
         self.all_losses = {}
 
         driving = DrivingAdaptor(
-            self.language_model.hidden_size, 
+            self.language_model.hidden_size,
             speed_wps_mode=speed_wps_mode,
-            predict_route_as_wps=predict_route_as_wps
+            predict_route_as_wps=predict_route_as_wps,
+            predict_control=predict_control,
         )
         
         self.adaptors = AdaptorList(
@@ -127,10 +139,7 @@ class DrivingModel(pl.LightningModule):
         """
         Samples a trajectory from the model.
         """
-        self.speed_wps, self.route, self.target_speed = None, None, None
-
-        BS = driving_input.camera_images.size(0)
-        input_embeds, _ = self.get_fixed_input_embeds(driving_input)
+        self.speed_wps, self.route, self.target_speed, self.angle = None, None, None, None
 
         # single forward pass same as during training so we can use the same function
         inputs = self.adaptors(driving_input)
@@ -141,7 +150,7 @@ class DrivingModel(pl.LightningModule):
             if v is not None:
                 setattr(self, k, v)
 
-        return self.speed_wps, self.route
+        return self.speed_wps, self.route, self.target_speed, self.angle
 
 
     def forward_model(self, 
@@ -214,7 +223,7 @@ class DrivingModel(pl.LightningModule):
         if per_sample:
             return loss_dict_only_losses, pred_labels
 
-        return summarise_losses(loss_dict_only_losses)
+        return summarise_losses(loss_dict_only_losses, weights=self.loss_weights)
 
     def training_step(self, batch: DrivingExample, _batch_idx: int = 0):
         output = self.forward_loss(batch)
@@ -237,9 +246,9 @@ class DrivingModel(pl.LightningModule):
     def predict_step(self, batch: DrivingExample, _batch_idx: int = 0):
         loss_dict, pred_labels = self.forward_loss(batch, per_sample=True)
 
-        per_sample_losses = loss_dict['waypoints_loss'][0].detach().cpu().numpy()
-        predictions = pred_labels['waypoints_prediction'].detach().cpu().numpy()
-        labels = pred_labels['waypoints_label'].detach().cpu().numpy()
+        per_sample_losses = loss_dict['speed_wps_loss'][0].detach().cpu().numpy()
+        predictions = pred_labels['speed_wps_prediction'].detach().cpu().numpy()
+        labels = pred_labels['speed_wps_label'].detach().cpu().numpy()
 
         for i in range(len(per_sample_losses)):
             self.all_losses[batch.run_id[i]] = per_sample_losses[i]
@@ -278,16 +287,23 @@ class DrivingModel(pl.LightningModule):
             ParamGroup(r"^(model|language_model|language_projection|adaptors|speed_encoder|route_encoder)\..*", self.lr, self.weight_decay),
             ParamGroup(r"^vision_model\..*", self.vision_lr, self.weight_decay),
         ]
-        optimizer_class = (
-            FusedAdam if isinstance(self.trainer.strategy, pl.strategies.DeepSpeedStrategy) else torch.optim.AdamW
-        )
+        if isinstance(self.trainer.strategy, pl.strategies.DeepSpeedStrategy):
+            from deepspeed.ops.adam import FusedAdam
+            optimizer_class = FusedAdam
+        else:
+            optimizer_class = torch.optim.AdamW
         optimizer = optimizer_class(configure_params_groups(self, param_groups, verbose=False), betas=self.betas)
         lrs = [pg['lr'] for pg in optimizer.param_groups]
         if self.trainer.max_steps == -1:
             max_steps = self.trainer.estimated_stepping_batches
         else:
             max_steps = self.trainer.max_steps
-        scheduler = torch.optim.lr_scheduler.OneCycleLR(
-            optimizer, max_lr=lrs, total_steps=max_steps, pct_start=self.pct_start
-        )
+        if self.scheduler_type == "cosine":
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=max_steps, eta_min=1e-7
+            )
+        else:
+            scheduler = torch.optim.lr_scheduler.OneCycleLR(
+                optimizer, max_lr=lrs, total_steps=max_steps, pct_start=self.pct_start
+            )
         return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "frequency": 1, "interval": "step"}}

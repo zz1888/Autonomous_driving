@@ -17,8 +17,8 @@ model:
 
 data_module:
   data_path: database/simlingo
-  batch_size: 4
-  num_workers: 0
+  batch_size: 16
+  num_workers: 4
   route_as: target_point
   hist_len: 1
   cut_bottom_quarter: False
@@ -28,8 +28,8 @@ data_module:
   img_shift_augmentation_prob: 0.5
   image_enhancing: True
 
-max_epochs: 30
-val_every_n_epochs: 2
+max_epochs: 20
+val_every_n_epochs: 1
 
 debug: true
 gpus: 1

@@ -1,7 +1,7 @@
 import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
-from transformers import AutoTokenizer, LlamaConfig, LlamaModel
+from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaConfig, LlamaModel
 from typing import Any, Dict, Optional, Tuple
 
 
@@ -39,20 +39,32 @@ CONFIGS: Dict[str, Dict[str, Any]] = {
     ),
 }
 
+PRETRAINED_VARIANTS: Dict[str, str] = {
+    "tiny-llama-1.1b": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+}
+
 
 class Llama(nn.Module):
-    def __init__(self, variant: str, lora: bool = False):
+    def __init__(self, variant: str, lora: bool = True):
         super().__init__()
 
-        config_overrides = CONFIGS[variant].copy()
+        pretrained_id = PRETRAINED_VARIANTS.get(variant)
+        if pretrained_id is not None:
+            self.model = AutoModelForCausalLM.from_pretrained(pretrained_id, trust_remote_code=True)
+            self.tokenizer = AutoTokenizer.from_pretrained(pretrained_id, trust_remote_code=True, use_fast=False)
+            self.embed_tokens = self.model.get_input_embeddings()
+            self.lm_head = self.model.get_output_embeddings()
+        else:
+            config_overrides = CONFIGS[variant].copy()
+            configuration = LlamaConfig(**config_overrides)
 
-        configuration = LlamaConfig(**config_overrides)
+            # Initializing a model from the llama-style configuration
+            self.model = LlamaModel(configuration)
+            self.tokenizer = AutoTokenizer.from_pretrained("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
+            self.model.embed_tokens = None
+            self.embed_tokens = None
+            self.lm_head = None
 
-        # Initializing a model from the llama-7b style configuration
-        self.model = LlamaModel(configuration)
-        self.tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-hf") # Add huggingface token
-        self.model.embed_tokens = None 
-        # self.model.base_model.embed_tokens = None
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 

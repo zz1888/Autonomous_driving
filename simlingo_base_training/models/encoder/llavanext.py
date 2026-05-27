@@ -5,11 +5,29 @@ from transformers import LlavaNextProcessor
 
 from simlingo_base_training.models.encoder.llavanext_model import LingoLlavaNextModel
 
+
+class MotionGate(nn.Module):
+    def __init__(self, embed_dim: int):
+        super().__init__()
+        self.gate = nn.Sequential(
+            nn.LayerNorm(embed_dim),
+            nn.Linear(embed_dim, embed_dim // 4),
+            nn.SiLU(),
+            nn.Linear(embed_dim // 4, 1),
+        )
+        nn.init.constant_(self.gate[-1].bias, -2.0)  # gate ≈ 0 at init
+        self.motion_scale = nn.Parameter(torch.tensor(0.1))
+
+    def forward(self, diff: torch.Tensor) -> torch.Tensor:
+        gate = torch.sigmoid(self.gate(diff))  # [..., 1]
+        return self.motion_scale * gate
+
+
 class LLaVAnextEncoderModel(nn.Module):
     def __init__(self,
-        variant: str, 
+        variant: str,
         embed_dim: int,
-        freeze: bool,
+        freeze: True,
         downsample_feature_grid_factor: int = 2,
         use_global_img = False,
     ):
@@ -31,7 +49,8 @@ class LLaVAnextEncoderModel(nn.Module):
         # Embeddings: BS, N_FRAMES, N_CAMS, N_PATCHES, EMBED_DIM
         self.temporal_encoding = nn.Parameter(0.02 * torch.randn(1, self.num_frames, 1, 1, embed_dim))
         self.camera_encoding = nn.Parameter(0.02 * torch.randn(1, 1, self.num_cameras, 1, embed_dim))
-        
+        self.motion_gate = MotionGate(embed_dim)
+
         # freeze the paramaeters -> no gradient updates
         if freeze:
             for p in self.parameters():
@@ -40,9 +59,22 @@ class LLaVAnextEncoderModel(nn.Module):
             # activate the projection layer
             self.projection.weight.requires_grad = True
             self.projection.bias.requires_grad = True
-            # self.positional_encoding.requires_grad = True
             self.temporal_encoding.requires_grad = True
             self.camera_encoding.requires_grad = True
+            # MotionGate is always trainable
+            for p in self.motion_gate.parameters():
+                p.requires_grad = True
+
+    def _encode_frames(self, pixel_values: torch.Tensor, image_sizes, num_frames: int, num_cams: int) -> torch.Tensor:
+        """Encode pixel_values and project. Returns [BS, num_frames, num_cams, N_tokens, D]."""
+        BS = pixel_values.shape[0]
+        raw = self.image_encoder.forward_image(
+            pixel_values=pixel_values,
+            image_sizes=image_sizes,
+            downsample_feature_grid_factor=self.downsample_feature_grid_factor,
+        )
+        proj = self.projection(raw)
+        return proj.view(BS, num_frames, num_cams, proj.shape[-2], proj.shape[-1])
 
     def forward(
         self,
@@ -55,27 +87,50 @@ class LLaVAnextEncoderModel(nn.Module):
 
         BS, num_frames, num_cams, num_patches, C, H, W = pixel_values.shape
 
+        if num_frames >= 2:
+            # Split image_sizes: [BS*num_frames*num_cams, 2] → by frame
+            if image_sizes is not None:
+                sizes_4d = image_sizes.view(BS, num_frames, num_cams, 2)
+                prev_sizes = sizes_4d[:, :-1].reshape(BS * (num_frames - 1) * num_cams, 2)
+                curr_sizes = sizes_4d[:, -1:].reshape(BS * num_cams, 2)
+            else:
+                prev_sizes = curr_sizes = None
 
-        patch_embeddings = self.image_encoder.forward_image(pixel_values=pixel_values, image_sizes=image_sizes, downsample_feature_grid_factor=self.downsample_feature_grid_factor)
-        patch_embeddings = self.projection(patch_embeddings)
-        patch_embeddings = patch_embeddings.view(-1, num_frames, num_cams, patch_embeddings.shape[-2], patch_embeddings.shape[-1])
+            # Encode prev frame(s) without gradient
+            with torch.no_grad():
+                feat_prev = self._encode_frames(
+                    pixel_values[:, :-1], prev_sizes, num_frames - 1, num_cams
+                )  # [BS, num_frames-1, num_cams, N, D]
+                feat_prev = feat_prev[:, -1]  # use last prev frame: [BS, num_cams, N, D]
+
+            # Encode current frame normally
+            feat_curr = self._encode_frames(
+                pixel_values[:, -1:], curr_sizes, 1, num_cams
+            )  # [BS, 1, num_cams, N, D]
+            feat_curr_sq = feat_curr[:, 0]  # [BS, num_cams, N, D]
+
+            # MotionGate temporal fusion
+            diff = feat_curr_sq - feat_prev  # [BS, num_cams, N, D]
+            gate_weight = self.motion_gate(diff)  # [BS, num_cams, N, 1]
+            feat_temporal = feat_curr_sq + gate_weight * diff  # [BS, num_cams, N, D]
+
+            # Reshape to [BS, 1, num_cams, N, D] for downstream compatibility
+            patch_embeddings = feat_temporal.unsqueeze(1)
+            out_frames = 1
+        else:
+            patch_embeddings = self._encode_frames(pixel_values, image_sizes, num_frames, num_cams)
+            out_frames = num_frames
 
         input_sequence = patch_embeddings
         _, _, _, n_tokens, channels = input_sequence.shape
 
-        # temporal embeddings
         if use_temporal_encoding:
-            input_sequence = input_sequence + self.temporal_encoding
-        # positional embeddings
-        # if use_positional_encoding:
-        #     input_sequence = input_sequence + self.positional_encoding
-        # per camera embeddings
+            input_sequence = input_sequence + self.temporal_encoding[:, :out_frames]
         if use_camera_encoding:
             input_sequence = input_sequence + self.camera_encoding
 
         embeds = input_sequence.view(BS, -1, channels)
-
-        return embeds, (num_frames, n_tokens, channels)
+        return embeds, (out_frames, n_tokens, channels)
 
 
 

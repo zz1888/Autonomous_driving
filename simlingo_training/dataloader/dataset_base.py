@@ -175,7 +175,7 @@ class BaseDataset(Dataset):  # pylint: disable=locally-disabled, invalid-name
             run_id_dict = {}
             if bucket_run_ids is not None:
                 for run_id in bucket_run_ids:
-                    run_id = run_id.replace('database/simlingo_v2_2025_01_10', self.bucket_path)
+                    run_id = run_id.replace('database/simlingo_v2_2025_01_10', self.data_path)
                     run_id_path = Path(run_id)
                     run_id_parent = run_id_path.parent
                     run_id_name = run_id_path.name

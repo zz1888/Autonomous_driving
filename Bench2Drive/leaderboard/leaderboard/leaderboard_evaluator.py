@@ -30,12 +30,13 @@ from srunner.scenariomanager.carla_data_provider import *
 from srunner.scenariomanager.timer import GameTime
 from srunner.scenariomanager.watchdog import Watchdog
 
-from leaderboard.scenarios.scenario_manager import ScenarioManager
-from leaderboard.scenarios.route_scenario import RouteScenario
-from leaderboard.envs.sensor_interface import SensorConfigurationInvalid
-from leaderboard.autoagents.agent_wrapper import AgentError, validate_sensor_configuration, TickRuntimeError
-from leaderboard.utils.statistics_manager import StatisticsManager, FAILURE_MESSAGES
-from leaderboard.utils.route_indexer import RouteIndexer
+from Bench2Drive.leaderboard.leaderboard.scenarios.scenario_manager import ScenarioManager
+from Bench2Drive.leaderboard.leaderboard.scenarios.route_scenario import RouteScenario
+from Bench2Drive.leaderboard.leaderboard.envs.sensor_interface import SensorConfigurationInvalid
+from Bench2Drive.leaderboard.leaderboard.autoagents.agent_wrapper import AgentError, validate_sensor_configuration, TickRuntimeError
+from Bench2Drive.leaderboard.leaderboard.utils.statistics_manager import StatisticsManager, FAILURE_MESSAGES
+from Bench2Drive.leaderboard.leaderboard.utils.route_indexer import RouteIndexer
+
 import atexit
 import subprocess
 import time
@@ -206,7 +207,7 @@ class LeaderboardEvaluator(object):
         """
         self.carla_path = os.environ["CARLA_ROOT"]
         args.port = find_free_port(args.port)
-        cmd1 = f"{os.path.join(self.carla_path, 'CarlaUE4.sh')} -RenderOffScreen -nosound -carla-rpc-port={args.port} -graphicsadapter={args.gpu_rank}"
+        cmd1 = f"{os.path.join(self.carla_path, 'CarlaUE4.sh')} -nosound -carla-rpc-port={args.port} -graphicsadapter={args.gpu_rank}"
         self.server = subprocess.Popen(cmd1, shell=True, preexec_fn=os.setsid)
         print(cmd1, self.server.returncode, flush=True)
         atexit.register(os.killpg, self.server.pid, signal.SIGKILL)

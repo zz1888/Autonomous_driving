@@ -62,7 +62,7 @@ class DataModule(LightningDataModule):
                     self.llm_tokenizer.pad_token = "[PAD]"
 
             else:
-                self.llm_tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-hf", token = "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")
+                self.llm_tokenizer = AutoTokenizer.from_pretrained("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
                 self.llm_tokenizer.add_eos_token = True
                 self.llm_tokenizer.add_bos_token = True
                 if self.llm_tokenizer.pad_token is None:
@@ -128,7 +128,9 @@ class DataModule(LightningDataModule):
             drop_last=True,
             collate_fn=self.dl_collate_fn,
             sampler=self.sampler_train,
-            pin_memory=True,
+            pin_memory=False,
+            persistent_workers=False,
+            prefetch_factor=2,
         )
 
     def predict_dataloader(self):
@@ -139,7 +141,9 @@ class DataModule(LightningDataModule):
             num_workers=self.num_workers,
             drop_last=True,
             collate_fn=self.dl_collate_fn,
-            pin_memory=True,
+            pin_memory=False,
+            persistent_workers=False,
+            prefetch_factor=2,
         )
 
     def val_dataloader(self):
@@ -147,10 +151,10 @@ class DataModule(LightningDataModule):
             self.val_dataset,
             batch_size=self.batch_size,
             shuffle=False,
-            num_workers=self.num_workers,
+            num_workers=0,
             drop_last=True,
             collate_fn=self.dl_collate_fn,
-            pin_memory=True,
+            pin_memory=False,
         )
 
 
@@ -204,6 +208,8 @@ class DataModule(LightningDataModule):
                 waypoints=torch.tensor(np.asarray([data[i]["waypoints"] for i in range(len(data))])).float(), # [B, F, 2] 11 future waypoints 0.2s apart
                 waypoints_1d=torch.tensor(np.asarray([data[i]["waypoints_1d"] for i in range(len(data))])).float(), # [B, F, 2] 11 future waypoints 0.2s apart
                 route_adjusted=torch.tensor(np.asarray([data[i]["route_adjusted"] for i in range(len(data))])).float(), # [B, 3, RH, RW] uint8 [0, 255]
+                target_speed=torch.tensor(np.asarray([data[i]["target_speed"] for i in range(len(data))])).float(),  # [B] m/s
+                angle=torch.tensor(np.asarray([data[i]["angle"] for i in range(len(data))])).float(),  # [B] radians
             ),
             run_id=encode_uint8([data[i]["measurement_path"] for i in range(len(data))], 1000),  # [B] str
             timestamp=torch.zeros(B, dtype=torch.int64),  # [B] float32

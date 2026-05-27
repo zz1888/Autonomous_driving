@@ -32,12 +32,14 @@ from scipy.interpolate import PchipInterpolator
 from scipy.optimize import fsolve
 from transformers import AutoConfig, AutoProcessor
 
-import scenario_logger
 import team_code.transfuser_utils as t_u
-from scenario_logger import ScenarioLogger
-from simlingo_training.utils.custom_types import DrivingInput, LanguageLabel
+from team_code.scenario_logger import ScenarioLogger
+
+from simlingo_base_training.utils.custom_types import DrivingInput as DrivingInputBase
+from simlingo_base_training.utils.custom_types import DrivingInput as DrivingInputFull, DrivingLabel as LanguageLabel
+from simlingo_base_training.utils.image_enhancing import histogram_equalization
 from simlingo_training.utils.internvl2_utils import build_transform, dynamic_preprocess
-from team_code.config_simlingo import GlobalConfig
+from team_code.config_simlingo_base import GlobalConfig
 from team_code.nav_planner import LateralPIDController, RoutePlanner
 from team_code.simlingo_utils import (
     get_camera_extrinsics,
@@ -66,7 +68,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
     """
         Main class that runs the agents with the run_step function
         """
-
+###
     def setup(self, path_to_conf_file, route_index=None):
         """Sets up the agent. route_index is for logging purposes"""
 
@@ -127,10 +129,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
 
         self.turn_controller = LateralPIDController(inference_mode=False)
 
-        image_fps = 5
-        image_history_length = 1
-
-        self.image_buffer = deque(maxlen=image_fps * image_history_length)
+        self.image_buffer = deque(maxlen=1)
 
         # config
         self.carla_frame_rate = 1.0 / 20.0  # CARLA frame rate in milliseconds
@@ -145,13 +144,19 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         self.route_planner_min_distance = 7.5
 
         #load config from .hydra folder
-        self.config_load_path = Path(self.config_path).parent.parent.parent / '.hydra' / 'config.yaml'
+        self.config_load_path = Path(self.config_path).parent.parent/ '.hydra' / 'config.yaml'
         with open(self.config_load_path, 'r') as file:
             cfg = OmegaConf.load(file)
         self.cfg = cfg
         self.cfg.model.vision_model.use_global_img = cfg.data_module.use_global_img
+        model_target = str(self.cfg.model.get("_target_", ""))
+        self.is_base_model = "simlingo_base_training" in model_target
+        self.hist_len = int(getattr(self.cfg.data_module, "hist_len", 1)) if self.is_base_model else 1
+        self.history_stride = self.config.data_save_freq if self.is_base_model else 1
+        self.image_buffer = deque(maxlen=max((self.hist_len - 1) * self.history_stride + 1, 1))
     
         processor = AutoProcessor.from_pretrained(cfg.model.vision_model.variant, trust_remote_code=True)
+        self.processor = processor
         if 'tokenizer' in processor.__dict__:
                 self.tokenizer = processor.tokenizer
         else:
@@ -162,15 +167,30 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         cache_dir = f"pretrained/{(cfg.model.vision_model.variant.split('/')[1])}"
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(torch.bfloat16)
-        self.model = hydra.utils.instantiate(
-                cfg.model,
-                cfg_data_module=cfg.data_module,
-                processor=processor,
-                cache_dir=cache_dir,
-                _recursive_=False
-            ).to(self.device)
+        if self.is_base_model:
+            # Base configs define nested targets directly in cfg.model.
+            self.model = hydra.utils.instantiate(
+                    cfg.model,
+                    route_as=cfg.data_module.route_as,
+                    vision_model={"use_global_img": cfg.data_module.use_global_img},
+                    _recursive_=True
+                ).to(self.device)
+        else:
+            # Full SimLingo expects these runtime kwargs and handles nested instantiate internally.
+            self.model = hydra.utils.instantiate(
+                    cfg.model,
+                    cfg_data_module=cfg.data_module,
+                    processor=processor,
+                    cache_dir=cache_dir,
+                    _recursive_=False
+                ).to(self.device)
         torch.set_default_dtype(default_dtype)
-        self.model.load_state_dict(torch.load(self.config_path))
+        state_dict = torch.load(self.config_path, map_location='cpu')
+        if isinstance(state_dict, dict) and 'state_dict' in state_dict:
+            state_dict = state_dict['state_dict']
+        if isinstance(state_dict, dict) and any(k.startswith('model.') for k in state_dict.keys()):
+            state_dict = {k.replace('model.', '', 1): v for k, v in state_dict.items()}
+        self.model.load_state_dict(state_dict)
         self.iter = self.config_path.split("epoch=")[-1].split("/")[0]
         self.session = self.config_path.split("/")[-4]
         
@@ -372,6 +392,8 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             camera = cv2.imdecode(compressed_image_i, cv2.IMREAD_UNCHANGED)
 
             rgb_pos = cv2.cvtColor(camera, cv2.COLOR_BGR2RGB)
+            if self.is_base_model and getattr(self.cfg.data_module, "image_enhancing", False):
+                rgb_pos = histogram_equalization(rgb_pos)
             rgb_pos = rgb_pos[:int(rgb_pos.shape[0] - (rgb_pos.shape[0] * 4.8) // 16), :, :] # do this from config to ensure it is the same as in training
 
             # Switch to pytorch channel first order
@@ -384,7 +406,35 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         rgbs = rgb
         image_sizes = None
         
-        if 'internvl2' in self.cfg.model.vision_model.variant.lower():
+        if self.is_base_model and self.cfg.data_module.encoder == 'llavanext':
+            # Match simlingo_base datamodule preprocessing for LlavaNext.
+            image_history = list(self.image_buffer)
+            temporal_images = []
+            for hist_idx in range(self.hist_len):
+                offset = (self.hist_len - 1 - hist_idx) * self.history_stride
+                buffer_idx = len(image_history) - 1 - offset
+                if buffer_idx < 0:
+                    buffer_idx = 0
+                temporal_images.append(image_history[buffer_idx])
+            rgbs = np.stack(temporal_images, axis=0)
+
+            T, N, C, H, W = rgbs.shape
+            images_batch = torch.tensor(rgbs).view(T * N, C, H, W)
+            images_list = list(images_batch)
+            images_processed = self.processor.image_processor(
+                images_list,
+                return_tensors="pt",
+                image_grid_pinpoints=[[336, 672]],
+            )
+            processed_image = images_processed['pixel_values']
+            image_sizes = images_processed['image_sizes']
+            if not self.cfg.data_module.use_global_img:
+                processed_image = processed_image[:, 1:]
+            num_patches = processed_image.shape[1]
+            new_height = processed_image.shape[3]
+            new_width = processed_image.shape[4]
+            processed_image = processed_image.view(1, T, N, num_patches, C, new_height, new_width)
+        elif 'internvl2' in self.cfg.model.vision_model.variant.lower():
             T, C, H, W = rgbs.shape
             transform = build_transform(input_size=448)
             images_processed_tmp = []
@@ -531,6 +581,24 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         else:
             result['route'] = route_img
 
+        result['speed'] = torch.FloatTensor([speed]).unsqueeze(0).to(self.device, dtype=torch.float32)
+
+        if self.is_base_model:
+            model_dtype = next(self.model.parameters()).dtype
+            B, T, N, num_patches, C, H, W = processed_image.shape
+            self.DrivingInput["camera_images"] = processed_image.to(self.device).bfloat16()
+            self.DrivingInput["image_sizes"] = image_sizes
+            self.DrivingInput["camera_intrinsics"] = torch.repeat_interleave(
+                get_camera_intrinsics(W, H, 110).unsqueeze(0), B * N, dim=0
+            ).view(B, N, 3, 3).float().to(self.device)
+            self.DrivingInput["camera_extrinsics"] = torch.repeat_interleave(
+                get_camera_extrinsics().unsqueeze(0), B * N, dim=0
+            ).view(B, N, 4, 4).float().to(self.device)
+            self.DrivingInput["vehicle_speed"] = result['speed'].to(self.device, dtype=model_dtype)
+            self.DrivingInput["map_route"] = result['route'].to(self.device, dtype=model_dtype)
+            self.DrivingInput["target_point"] = result['target_point'].to(self.device, dtype=model_dtype)
+            return result
+
         if self.config.use_cot:
             prompt = f"Current speed: {speed} m/s. {prompt_tp} What should the ego do next?"
         else:
@@ -548,8 +616,6 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         elif self.user_flag == 0:
             prompt = f"<SAFETY> {prompt}"
 
-
-        result['speed'] = torch.FloatTensor([speed]).unsqueeze(0).to(self.device, dtype=torch.float32)
 
         B, T, num_patches, C, H, W = processed_image.shape
         assert B == 1
@@ -680,10 +746,18 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         tick_data = self.tick(input_data)
 
         # initialize DrivingInput with dict self.DrivingInput
-        model_input = DrivingInput(**self.DrivingInput)
-        pred_speed_wps, pred_route, language = self.model(model_input)
+        model_input_cls = DrivingInputBase if self.is_base_model else DrivingInputFull
+        model_input = model_input_cls(**self.DrivingInput)
+        if self.is_base_model:
+            pred_speed_wps, pred_route, pred_target_speed, pred_angle = self.model(model_input)
+            language = None
+        else:
+            pred_speed_wps, pred_route, language = self.model(model_input)
+            pred_target_speed, pred_angle = None, None
         pred_speed_wps = pred_speed_wps.float() if pred_speed_wps is not None else None
         pred_route = pred_route.float() if pred_route is not None else None
+        pred_target_speed = pred_target_speed.float() if pred_target_speed is not None else None
+        pred_angle = pred_angle.float() if pred_angle is not None else None
 
         # prepare velocity input
         gt_velocity = tick_data['speed']
@@ -723,9 +797,11 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
                         draw.ellipse((points_2d[0]-3, points_2d[1]-3, points_2d[0]+3, points_2d[1]+3), fill=(255, 0, 0, 255))
             
             if pred_speed_wps is not None:
-                pred_speed_wps_img_coords = project_points(pred_speed_wps[0].detach().cpu().numpy(), camera_intrinsics, tvec=tvec, rvec=rvec)
-                for points_2d in pred_speed_wps_img_coords:
-                        draw.ellipse((points_2d[0]-2, points_2d[1]-2, points_2d[0]+2, points_2d[1]+2), fill=(0, 255, 0, 255))
+                pred_speed_wps_np = pred_speed_wps[0].detach().cpu().numpy()
+                if pred_speed_wps_np.shape[-1] == 2:
+                    pred_speed_wps_img_coords = project_points(pred_speed_wps_np, camera_intrinsics, tvec=tvec, rvec=rvec)
+                    for points_2d in pred_speed_wps_img_coords:
+                            draw.ellipse((points_2d[0]-2, points_2d[1]-2, points_2d[0]+2, points_2d[1]+2), fill=(0, 255, 0, 255))
 
             if language is not None:
                 # write the language to the bottom of the image
@@ -762,7 +838,9 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             # save
             image.save(f"{self.save_path_img}/{self.step}.png")
             
-        steer, throttle, brake = self.control_pid(pred_route, gt_velocity, pred_speed_wps)
+        steer, throttle, brake = self.control_pid(pred_route, gt_velocity, pred_speed_wps,
+                                                   pred_target_speed=pred_target_speed,
+                                                   pred_angle=pred_angle)
 
         # # 0.1 is just an arbitrary low number to threshold when the car is stopped
         if gt_velocity < 0.1:
@@ -788,41 +866,66 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             self.control = carla.VehicleControl(0.0, 0.0, 1.0)
         else:
             self.control = control
-            
+
         metric_info = self.get_metric_info()
         self.metric_info[self.step] = metric_info
         if self.save_path_metric is not None and self.step % 1 == 0:
-                # metric info
                 outfile = open(f"{self.save_path_metric}/metric_info.json", 'w')
                 json.dump(self.metric_info, outfile, indent=4)
                 outfile.close()
 
         return control
 
-    def control_pid(self, route_waypoints, velocity, speed_waypoints):
+    def control_pid(self, route_waypoints, velocity, speed_waypoints,
+                    pred_target_speed=None, pred_angle=None):
         """
         Predicts vehicle control with a PID controller.
-        Used for waypoint predictions
+        Used for waypoint predictions.
+        When predict_control=True and pred_target_speed is available, use the
+        direct target-speed head. Otherwise derive speed from waypoints.
         """
         assert route_waypoints.size(0) == 1
         route_waypoints = route_waypoints[0].data.cpu().numpy()
         speed = velocity[0].data.cpu().numpy()
-        speed_waypoints = speed_waypoints[0].data.cpu().numpy()
 
-        # m / s required to drive
-        one_second = int(self.config.carla_fps // (self.config.wp_dilation * self.config.data_save_freq))
-        half_second = one_second // 2
-        desired_speed = np.linalg.norm(speed_waypoints[half_second - 2] - speed_waypoints[one_second - 2]) * 2.0
+        # --- Longitudinal control ---
+        use_target_speed = (
+            pred_target_speed is not None
+            and bool(getattr(self.cfg.model, "predict_control", False))
+        )
+        if use_target_speed:
+            # Use model-predicted target speed directly (m/s)
+            desired_speed = pred_target_speed[0].item()
+        else:
+            # Fallback: derive desired speed from speed waypoint distances
+            speed_waypoints = speed_waypoints[0].data.cpu().numpy()
+            dt = self.config.data_save_freq / self.config.carla_fps  # seconds per waypoint step
+            if speed_waypoints.shape[-1] == 1:
+                progress = speed_waypoints[:, 0]
+                one_second = int(self.config.carla_fps // (self.config.wp_dilation * self.config.data_save_freq))
+                half_second = one_second // 2
+                desired_speed = (progress[one_second - 2] - progress[half_second - 2]) / (half_second * dt)
+            else:
+                one_second = int(self.config.carla_fps // (self.config.wp_dilation * self.config.data_save_freq))
+                half_second = one_second // 2
+                desired_speed = (
+                    np.linalg.norm(speed_waypoints[half_second - 2] - speed_waypoints[one_second - 2])
+                    / (half_second * dt)
+                )
 
-        brake = ((desired_speed < self.config.brake_speed) or ((speed / desired_speed) > self.config.brake_ratio))
+        desired_speed = max(0.0, float(desired_speed))
+        brake = (
+            desired_speed < self.config.brake_speed
+            or (desired_speed > 1e-4 and (speed / desired_speed) > self.config.brake_ratio)
+        )
 
         delta = np.clip(desired_speed - speed, 0.0, self.config.clip_delta)
         throttle = self.speed_controller.step(delta)
         throttle = np.clip(throttle, 0.0, self.config.clip_throttle)
         throttle = throttle if not brake else 0.0
 
+        # --- Lateral control: route waypoints ---
         route_interp = self.interpolate_waypoints(route_waypoints.squeeze())
-
         steer = self.turn_controller.step(route_interp, speed)
 
         steer = np.clip(steer, -1.0, 1.0)
@@ -862,11 +965,12 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         Also writes logging files to disk.
         """
 
-        del self.model
-        del self.config
-        if self.cfg.data_module.encoder == 'llavanext':
+        if hasattr(self, "model"):
+            del self.model
+        if hasattr(self, "config"):
+            del self.config
+        if getattr(self, "is_base_model", False) and self.cfg.data_module.encoder == 'llavanext' and hasattr(self, "processor"):
             del self.processor
-
 
 # Filter Functions
 def bicycle_model_forward(x, dt, steer, throttle, brake):
@@ -961,3 +1065,7 @@ def residual_measurement_h(a, b):
     y = a - b
     y[2] = t_u.normalize_angle(y[2])
     return y
+    ###
+
+class AgentSimlingo(LingoAgent):
+    pass

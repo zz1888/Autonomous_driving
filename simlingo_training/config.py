@@ -8,7 +8,7 @@ from hydra.core.config_store import ConfigStore
 class VLMEncoderConfig:
     variant: str = 'OpenGVLab/InternVL2-1B'
     embed_dim: int = 512
-    freeze: bool = False
+    freeze: bool = True
 
     _target_: str = "simlingo_training.models.encoder.vlm.VLMEncoderModel"
 
@@ -42,16 +42,16 @@ class DrivingModelConfig:
 
 @dataclass
 class DatasetBaseConfig:
-    data_path: str = "/home/katrinrenz/coding/wayve_carla/database/expertv3_2*"
-    bucket_path: str = "data/buckets"
+    data_path: str = "database/simlingo"
+    bucket_path: str = "database/bucketsv2_simlingo"
 
     cut_bottom_quarter: bool = False
     use_1d_wps: bool = False
 
     use_commentary: bool = False
     use_qa: bool = False
-    qa_augmentation: bool = True
-    commentary_augmentation: bool = True
+    qa_augmentation: bool = False
+    commentary_augmentation: bool = False
     use_old_towns: bool = False
     use_only_old_towns: bool = False
     use_town13: bool = False
@@ -70,7 +70,7 @@ class DatasetBaseConfig:
     
     num_route_points: int = 20
 
-    route_as: str = 'target_point_command' # target_point_command, target_point, command
+    route_as: str = 'target_point' # target_point_command, target_point, command
     use_lmdrive_commands: bool = True
 
 @dataclass
@@ -103,7 +103,7 @@ class DrivingDataModuleConfig:
     qa_dataset: Optional[QADatasetConfig] = field(default_factory=QADatasetConfig)
     insteval_dataset: Optional[InstEvalDatasetConfig] = field(default_factory=InstEvalDatasetConfig)
 
-    batch_size: int = 16
+    batch_size: int = 24
     num_workers: int = 10
     
     train_partitions: Optional[Dict[str, float]] = None
@@ -119,7 +119,7 @@ class TrainConfig:
     data_module: Any
 
     seed: int = 42
-    gpus: int = 8
+    gpus: int = 1
 
     resume: bool = False
     resume_path: Optional[str] = None
@@ -141,7 +141,7 @@ class TrainConfig:
     # max_steps: int = 100_000
     max_epochs: int = 20
     precision: str = "16-mixed"
-    strategy: str = "deepspeed_stage_2" # deepspeed_stage_2 ddp
+    strategy: str = "auto"  # deepspeed_stage_2 ddp
     # val_check_interval: int = 5000
     val_every_n_epochs: int = 1
 

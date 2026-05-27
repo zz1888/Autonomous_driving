@@ -80,12 +80,12 @@ class VisualiseCallback(Callback):
         batch: DrivingExample,
         batch_idx: int,
     ):
-        if trainer.global_step % self.interval != 0:
+        if trainer.global_step == 0 or trainer.global_step % self.interval != 0:
             return
 
         with torch.cuda.amp.autocast(enabled=True):
             # Forward with sampling
-            speed_wps, route = pl_module.forward(batch.driving_input)
+            speed_wps, route, *_ = pl_module.forward(batch.driving_input)
 
         try:
             self._visualise_training_examples(batch, speed_wps, trainer, pl_module, 'waypoints')
@@ -120,7 +120,7 @@ class VisualiseCallback(Callback):
         # only visualise max 16 examples
         # if len(batch.run_id) > 16:
         if name == 'waypoints':
-            waypoint_vis = visualise_waypoints(batch, waypoints)
+            waypoint_vis = visualise_waypoints(batch, waypoints, route=False)
         elif name == 'route':
             waypoint_vis = visualise_waypoints(batch, waypoints, route=True)
         # pl_module.logger.log_image("visualise/images", images=[Image.fromarray(si_vis)], step=trainer.global_step)
@@ -142,14 +142,12 @@ def fig_to_np(fig):
 def visualise_waypoints(batch: DrivingExample, waypoints, route=False):
     assert batch.driving_label is not None
 
-    n = 11
-    if route:
-        n = 20
+    n = 20 if route else waypoints.shape[1]
     fig = plt.figure(figsize=(10, 10))
     if route:
         gt_waypoints = batch.driving_label.route_adjusted[:, :n, :].cpu().numpy()
     else:
-        gt_waypoints = batch.driving_label.poses[..., :n, :2, 3].cpu().numpy()
+        gt_waypoints = batch.driving_label.waypoints_1d[:, :n, :1].cpu().numpy()
     pred_waypoints = waypoints[:, :n].cpu().numpy()
     b = gt_waypoints.shape[0]
     # visualise max 16 examples
@@ -160,17 +158,24 @@ def visualise_waypoints(batch: DrivingExample, waypoints, route=False):
 
     # add space for text
     fig.subplots_adjust(hspace=0.8)
+    is_1d = pred_waypoints.shape[-1] == 1
     for i in range(b):
         ax = fig.add_subplot(rows, cols, i + 1)
-        # Predicted waypoints
-        ax.scatter(-pred_waypoints[i, :, 1], pred_waypoints[i, :, 0], marker="o", c="b")
-        ax.plot(-pred_waypoints[i, :, 1], pred_waypoints[i, :, 0], c="b")
-        # Ground truth waypoints (i.e. ideal waypoints)
-        ax.scatter(-gt_waypoints[i, :, 1], gt_waypoints[i, :, 0], marker="x", c="g")
-        ax.plot(-gt_waypoints[i, :, 1], gt_waypoints[i, :, 0], c="g")
+        if is_1d:
+            # 1D: cumulative progress vs timestep
+            steps = np.arange(pred_waypoints.shape[1])
+            ax.plot(steps, pred_waypoints[i, :, 0], c="b", label="pred")
+            ax.plot(steps, gt_waypoints[i, :, 0], c="g", linestyle="--", label="gt")
+            ax.set_xlabel("step")
+            ax.set_ylabel("progress (m)")
+        else:
+            ax.scatter(-pred_waypoints[i, :, 1], pred_waypoints[i, :, 0], marker="o", c="b")
+            ax.plot(-pred_waypoints[i, :, 1], pred_waypoints[i, :, 0], c="b")
+            ax.scatter(-gt_waypoints[i, :, 1], gt_waypoints[i, :, 0], marker="x", c="g")
+            ax.plot(-gt_waypoints[i, :, 1], gt_waypoints[i, :, 0], c="g")
+            ax.set_aspect("equal", adjustable="box")
+            ax.set_box_aspect(1.5)
         ax.set_title(f"waypoints {i}")
         ax.grid()
-        ax.set_aspect("equal", adjustable="box")
-        ax.set_box_aspect(1.5)
 
     return fig_to_np(fig)

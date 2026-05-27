@@ -65,6 +65,8 @@ class CARLA_Data(BaseDataset):  # pylint: disable=locally-disabled, invalid-name
         data = self.load_waypoints(data, loaded_measurements, aug_translation, aug_rotation)
        
         data['speed'] = current_measurement['speed']
+        data['target_speed'] = current_measurement['target_speed']
+        data['angle'] = current_measurement['angle']
 
         data = self.load_route(data, current_measurement, aug_translation, aug_rotation)
 

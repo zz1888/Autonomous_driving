@@ -1,305 +1,298 @@
-# %%
 import os
+import json
+import signal
 import subprocess
+import sys
 import time
-import ujson
-import shutil
-from tqdm.autonotebook import tqdm
+from pathlib import Path
+from tqdm import tqdm
 
-# %%
-def get_num_jobs(job_name, username):
-    len_usrn = len(username)
-    num_running_jobs = int(
-        subprocess.check_output(
-            f"SQUEUE_FORMAT2='username:{len_usrn},name:130' squeue --sort V | grep {username} | grep {job_name} | wc -l",
-            shell=True,
-        ).decode('utf-8').replace('\n', ''))
+# ── Config ───────────────────────────────────────────────────────────────────
+REPO_ROOT  = "/home/mediacore/simlingo"
+CARLA_ROOT = os.path.expanduser("~/software/carla0915")
+
+AGENT_FILE  = f"{REPO_ROOT}/team_code/agent_simlingo.py"
+CHECKPOINT  = f"{REPO_ROOT}/outputs/2026_05_23_00_30_24_simlingo_base_seed_42_finetune_10ep_1e-5_cosine/checkpoints/last.ckpt+bench2drive_test"
+ROUTE_PATH  = "/home/mediacore/simlingo/leaderboard/data/bench2drive_split"
+OUT_ROOT    = f"{REPO_ROOT}/eval_results/Bench2Drive"
+EVALUATOR   = f"{REPO_ROOT}/Bench2Drive/leaderboard/leaderboard/leaderboard_evaluator.py"
+EVAL_NAME   = Path(CHECKPOINT.split("+", 1)[0]).parents[1].name + "_eval_stride5"
+
+SEED    = 42
+PORT    = 2000
+TM_PORT = 8000
+TIMEOUT = 600
+MAX_RETRIES = 3
+MONITOR_INTERVAL = 1.0
+SKIP_COMPLETED = True
+FATAL_PATTERNS = (
+    "Signal 11 caught",
+    "CommonUnixCrashHandler: Signal=11",
+    "Segmentation fault",
+    "Watchdog exception",
+    "while waiting for the simulator",
+    "The simulation took longer than",
+    "Engine crash handling finished",
+    "Failed to stop the scenario, the statistics might be empty",
+)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def build_env(save_path):
+    env = os.environ.copy()
+    env["CARLA_ROOT"] = CARLA_ROOT
+    env["SAVE_PATH"] = save_path
+    existing = env.get("PYTHONPATH", "")
+    extra = [
+        REPO_ROOT,
+        f"{CARLA_ROOT}/PythonAPI/carla",
+        f"{CARLA_ROOT}/PythonAPI/carla/dist/carla-0.9.15-py3.7-linux-x86_64.egg",
+        f"{REPO_ROOT}/Bench2Drive/leaderboard",
+        f"{REPO_ROOT}/Bench2Drive/scenario_runner",
+    ]
+    env["PYTHONPATH"] = ":".join(extra + ([existing] if existing else []))
+    env["SCENARIO_RUNNER_ROOT"] = f"{REPO_ROOT}/Bench2Drive/scenario_runner"
+    return env
+
+
+def kill_carla():
+    """Kill any leftover CarlaUE4 processes to free GPU memory."""
+    subprocess.run(["pkill", "-f", "CarlaUE4"], capture_output=True)
+    import time; time.sleep(3)
+
+
+def has_fatal_pattern(text):
+    return next((pattern for pattern in FATAL_PATTERNS if pattern in text), None)
+
+
+def terminate_process(proc):
+    if proc.poll() is not None:
+        return
+
     try:
-        with open('max_num_jobs.txt', 'r', encoding='utf-8') as f:
-            max_num_parallel_jobs = int(f.read())
-    except:
-        max_num_parallel_jobs = 1
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except OSError:
+        proc.terminate()
 
-    return num_running_jobs, max_num_parallel_jobs
+    try:
+        proc.wait(timeout=20)
+        return
+    except subprocess.TimeoutExpired:
+        pass
 
-# %%
-def bash_file_bench2drive(job, port, tm_port, partition_name):
-    cfg = job["cfg"]
-    route = job["route"]
-    route_id = job["route_id"]
-    seed = job["seed"]
-    viz_path = job["viz_path"]
-    result_file = job["result_file"]
-    log_file = job["log_file"]
-    err_file = job["err_file"]
-    job_file = job["job_file"]
-
-    with open(job_file, 'w', encoding='utf-8') as rsh:
-            rsh.write(f'''#!/bin/bash
-#SBATCH --job-name={cfg["agent"]}_{seed}_{cfg["benchmark"]}_{route_id}
-#SBATCH --partition={partition_name}
-#SBATCH -o {log_file}
-#SBATCH -e {err_file}
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=40gb
-#SBATCH --time=3-00:00
-#SBATCH --gres=gpu:1
-
-echo JOB ID $SLURM_JOB_ID
-
-source ~/.bashrc
-. ~/software/anaconda3/etc/profile.d/conda.sh # idk why i need to do this, bashrc should be enough
-conda activate simlingo # TODO: change to your conda env
-cd {cfg["repo_root"]}
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    except OSError:
+        proc.kill()
+    proc.wait()
 
 
-export CARLA_ROOT={cfg["carla_root"]}
-export PYTHONPATH=$PYTHONPATH:{cfg["carla_root"]}/PythonAPI/carla
-export PYTHONPATH=$PYTHONPATH:{cfg["carla_root"]}/PythonAPI/carla/dist/carla-0.9.15-py3.7-linux-x86_64.egg
-export PYTHONPATH=$PYTHONPATH:{cfg["repo_root"]}/Bench2Drive/leaderboard
-export PYTHONPATH=$PYTHONPATH:{cfg["repo_root"]}/Bench2Drive/scenario_runner
-export SCENARIO_RUNNER_ROOT={cfg["repo_root"]}/Bench2Drive/scenario_runner
+def read_result_status(result_file):
+    if not os.path.exists(result_file):
+        return False, "missing result json"
 
-export SAVE_PATH={viz_path}
+    try:
+        with open(result_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        return False, f"invalid result json: {exc}"
+
+    checkpoint = data.get("_checkpoint", {})
+    progress = checkpoint.get("progress", [])
+    records = checkpoint.get("records", [])
+
+    if len(progress) < 2 or progress[0] < progress[1]:
+        return False, f"incomplete progress: {progress}"
+    if not records:
+        return False, "empty records"
+
+    entry_status = str(data.get("entry_status", ""))
+    if entry_status.lower() in {"started", "crashed", "invalid"}:
+        return False, f"bad entry_status: {entry_status}"
+
+    bad_statuses = []
+    for record in records:
+        status = str(record.get("status", ""))
+        status_l = status.lower()
+        if status_l == "started" or "failed" in status_l or "crashed" in status_l:
+            bad_statuses.append(status)
+    if bad_statuses:
+        return False, f"bad record status: {bad_statuses}"
+
+    return True, "result complete"
 
 
-python -u {cfg["repo_root"]}/Bench2Drive/leaderboard/leaderboard/leaderboard_evaluator.py --routes={route} \
---repetitions=1 \
---track=SENSORS \
---checkpoint={result_file} \
---timeout=600 \
---agent={cfg["agent_file"]} \
---agent-config={cfg["checkpoint"]} \
---traffic-manager-seed={seed} \
---port={port} \
---traffic-manager-port={tm_port}
-''')
+def monitor_process(proc, log_file, start_pos):
+    fatal_pattern = None
+    observed_log = ""
+    read_pos = start_pos
+
+    try:
+        with open(log_file, "r", encoding="utf-8", errors="replace") as log_reader:
+            while proc.poll() is None:
+                log_reader.seek(read_pos)
+                chunk = log_reader.read()
+                if chunk:
+                    read_pos = log_reader.tell()
+                    observed_log += chunk
+                    fatal_pattern = has_fatal_pattern(observed_log)
+                    if fatal_pattern:
+                        terminate_process(proc)
+                        kill_carla()
+                        break
+                time.sleep(MONITOR_INTERVAL)
+
+            log_reader.seek(read_pos)
+            chunk = log_reader.read()
+            if chunk:
+                observed_log += chunk
+    except KeyboardInterrupt:
+        terminate_process(proc)
+        kill_carla()
+        raise
+
+    return proc.wait(), fatal_pattern or has_fatal_pattern(observed_log), observed_log
 
 
-# %%
-def get_running_jobs():
-    running_jobs = subprocess.check_output(f'squeue --me',shell=True).decode('utf-8').splitlines()
-    running_jobs = set(x.strip().split(" ")[0] for x in running_jobs[1:])
-    return running_jobs
+def append_log(log_file, message):
+    with open(log_file, "a", encoding="utf-8") as f:
+        f.write(message + "\n")
+        f.flush()
 
-# %%
-def filter_completed(jobs):
-    filtered_jobs = []
 
-    running_jobs = get_running_jobs()
-    for job in jobs:
+def run_route_attempt(route_path, result_file, log_file, env, attempt):
+    cmd = [
+        sys.executable, "-u", EVALUATOR,
+        f"--routes={route_path}",
+        "--repetitions=1",
+        "--track=SENSORS",
+        f"--checkpoint={result_file}",
+        f"--timeout={TIMEOUT}",
+        f"--agent={AGENT_FILE}",
+        f"--agent-config={CHECKPOINT}",
+        f"--traffic-manager-seed={SEED}",
+        f"--port={PORT}",
+        f"--traffic-manager-port={TM_PORT}",
+    ]
 
-        # If job is running we keep it in list (other function does killing)
-        if "job_id" in job:
-           if job["job_id"] in running_jobs:
-              filtered_jobs.append(job)
-              continue
+    if os.path.exists(result_file):
+        os.remove(result_file)
 
-        # Keep failed jobs to resubmit
-        result_file = job["result_file"]
-        if os.path.exists(result_file):
-            try:
-                with open(result_file, "r") as f:
-                    evaluation_data = ujson.load(f)
-            except:
-                if job["tries"] > 0:
-                    filtered_jobs.append(job)
+    append_log(log_file, f"\n===== attempt {attempt}/{MAX_RETRIES} started =====")
+    log_start = os.path.getsize(log_file)
+    with open(log_file, "a", encoding="utf-8") as f:
+        proc = subprocess.Popen(
+            cmd,
+            env=env,
+            stdout=f,
+            stderr=subprocess.STDOUT,
+            cwd=REPO_ROOT,
+            start_new_session=True,
+        )
+        try:
+            returncode, fatal_pattern, attempt_log = monitor_process(proc, log_file, log_start)
+        except KeyboardInterrupt:
+            append_log(log_file, f"===== attempt {attempt}/{MAX_RETRIES} interrupted =====")
+            raise
+
+    append_log(log_file, f"===== attempt {attempt}/{MAX_RETRIES} exited: {returncode} =====")
+    kill_carla()
+
+    if fatal_pattern:
+        return False, returncode, f"fatal pattern: {fatal_pattern}"
+
+    fatal_pattern = has_fatal_pattern(attempt_log)
+    if fatal_pattern:
+        return False, returncode, f"fatal pattern: {fatal_pattern}"
+
+    result_ok, result_reason = read_result_status(result_file)
+    if returncode == 0 and result_ok:
+        return True, returncode, result_reason
+
+    if returncode != 0:
+        return False, returncode, f"exit {returncode}; {result_reason}"
+    return False, returncode, result_reason
+
+
+def run_route(route_path, result_file, log_file, env, route_id):
+    Path(log_file).write_text(
+        f"[{route_id}] route={route_path}\nmax_retries={MAX_RETRIES}\n",
+        encoding="utf-8",
+    )
+
+    last_returncode = None
+    last_reason = "not started"
+    for attempt in range(1, MAX_RETRIES + 1):
+        tqdm.write(f"[{route_id}] attempt {attempt}/{MAX_RETRIES}")
+        ok, returncode, reason = run_route_attempt(
+            route_path, result_file, log_file, env, attempt
+        )
+        last_returncode = returncode
+        last_reason = reason
+        append_log(log_file, f"===== attempt {attempt}/{MAX_RETRIES} result: {reason} =====")
+
+        if ok:
+            tqdm.write(f"[{route_id}] done on attempt {attempt}")
+            return True, returncode, reason
+
+        tqdm.write(f"[{route_id}] retry needed after attempt {attempt}: {reason}")
+        kill_carla()
+
+    return False, last_returncode, last_reason
+
+
+def main():
+    routes = sorted(Path(ROUTE_PATH).glob("*.xml"))
+    if not routes:
+        print(f"No route XML files found in {ROUTE_PATH}")
+        sys.exit(1)
+    print(f"Found {len(routes)} routes. Starting sequential evaluation (seed={SEED}).\n")
+
+    base_dir = os.path.join(OUT_ROOT, EVAL_NAME, f"seed_{SEED}")
+    res_dir  = os.path.join(base_dir, "res")
+    log_dir  = os.path.join(base_dir, "log")
+    viz_dir  = os.path.join(base_dir, "viz")
+    os.makedirs(res_dir, exist_ok=True)
+    os.makedirs(log_dir, exist_ok=True)
+    os.makedirs(viz_dir, exist_ok=True)
+
+    env = build_env(viz_dir)
+    succeeded, failed = [], []
+
+    try:
+        for route in tqdm(routes, desc="Routes", unit="route"):
+            route_id = route.stem.split("_")[-1].zfill(3)
+            result_file = os.path.join(res_dir, f"{route_id}_res.json")
+            log_file    = os.path.join(log_dir, f"{route_id}.log")
+
+            if SKIP_COMPLETED:
+                result_ok, result_reason = read_result_status(result_file)
+                if result_ok:
+                    succeeded.append(route_id)
+                    tqdm.write(f"[{route_id}] skip completed ({result_reason})")
                     continue
 
+            tqdm.write(f"[{route_id}] {route.name}")
+            ok, returncode, reason = run_route(route, result_file, log_file, env, route_id)
 
-            progress = evaluation_data['_checkpoint']['progress']
-
-            need_to_resubmit = False
-            if len(progress) < 2 or progress[0] < progress[1]:
-                need_to_resubmit = True
+            if ok:
+                succeeded.append(route_id)
             else:
-                for record in evaluation_data['_checkpoint']['records']:
-                    if record['status'] == 'Failed - Agent couldn\'t be set up':
-                        need_to_resubmit = True
-                    elif record['status'] == 'Failed':
-                        need_to_resubmit = True
-                    elif record['status'] == 'Failed - Simulation crashed':
-                        need_to_resubmit = True
-                    elif record['status'] == 'Failed - Agent crashed':
-                        need_to_resubmit = True
+                failed.append(route_id)
+                tqdm.write(f"[{route_id}] FAILED after {MAX_RETRIES} attempts ({reason}, exit {returncode}) — log: {log_file}")
+    finally:
+        kill_carla()
 
-            if need_to_resubmit and job["tries"] > 0:
-                filtered_jobs.append(job)
-        # Results file doesnt exist
-        elif job["tries"] > 0:
-            filtered_jobs.append(job)
-    return filtered_jobs
-
-# %%
-def kill_dead_jobs(jobs):
-
-    running_jobs = get_running_jobs()
-
-    for job in jobs:
-
-        if "job_id" in job:
-            job_id = job["job_id"]
-
-        elif os.path.exists(job["log_file"]):
-            with open(job["log_file"], "r") as f:
-                job_id = f.readline().strip().replace("JOB ID ", "")
-        
-        else:
-            continue
-
-        if job_id not in running_jobs:
-            continue
-
-        log = job["log_file"]
-        if not os.path.exists(job["log_file"]):
-            continue
-
-        with open(log) as f:
-            lines = f.readlines()
-        if len(lines)==0:
-            continue
-
-        # TODO this needs to be improved, maybe also consider the err file?
-        if any(["Watchdog exception" in line for line in lines]) or \
-            "Engine crash handling finished; re-raising signal 11 for the default handler. Good bye.\n" in lines or \
-            "[91mStopping the route, the agent has crashed:\n" in lines:
-
-            subprocess.Popen(f"scancel {job_id}", shell=True)
-
-configs = [
-    {
-    "agent": "simlingo",
-    "checkpoint": "/PATH/TO/REPO/outputs/simlingo/checkpoints/epoch=013.ckpt/pytorch_model.pt",
-    "benchmark": "bench2drive",
-    "route_path": "/PATH/TO/REPO/leaderboard/data/bench2drive_split",
-    "seeds": [1,2,3], # TODO: change depending on how many eval seeds you wanna run (paper uses one eval seed on three train seeds)
-    "tries": 2,
-    "out_root": "/PATH/TO/REPO/eval_results/Bench2Drive",
-    "carla_root": "~/software/carla0915",
-    "repo_root": "/PATH/TO/REPO",
-    "agent_file": "/PATH/TO/REPO/team_code/agent_simlingo.py",
-    "team_code": "team_code",
-    "agent_config": "not_used",
-    "username": "YOUR_USERNAME"
-    }
-    ] # TODO: change to your paths and model, you can add multiple configs here, whch get evaluated after each other
+    print(f"\n{'='*55}")
+    print(f"Completed: {len(succeeded)}/{len(routes)} routes succeeded")
+    if failed:
+        print(f"Failed ({len(failed)}): {failed}")
+    print(f"Results in: {res_dir}")
 
 
-# %%
-job_queue = []
-for cfg_idx, cfg in enumerate(configs):
-    route_path = cfg["route_path"]
-    routes = [x for x in os.listdir(route_path) if x[-4:]==".xml"] #########################################
-
-    if cfg["benchmark"] == "bench2drive":
-        fill_zeros = 3
-    else: 
-        fill_zeros = 2
-
-    for seed in cfg["seeds"]:
-        seed = str(seed)
-
-        base_dir = os.path.join(cfg["out_root"], cfg["agent"], cfg["benchmark"], seed)
-        os.makedirs(os.path.join(base_dir, "run"), exist_ok=True)
-        os.makedirs(os.path.join(base_dir, "res"), exist_ok=True)
-        os.makedirs(os.path.join(base_dir, "out"), exist_ok=True)
-        os.makedirs(os.path.join(base_dir, "err"), exist_ok=True)
-
-        for route in routes:
-            route_id = route.split("_")[-1][:-4].zfill(fill_zeros)
-            route = os.path.join(route_path, route)
-
-            viz_path = os.path.join(base_dir, "viz", route_id)
-            os.makedirs(viz_path, exist_ok=True)
-
-            result_file = os.path.join(base_dir, "res", f"{route_id}_res.json")
-            log_file = os.path.join(base_dir, "out", f"{route_id}_out.log")
-            err_file = os.path.join(base_dir, "err", f"{route_id}_err.log")
-
-            job_file = os.path.join(base_dir, "run", f'eval_{route_id}.sh')
-            
-            job = {
-                "cfg": cfg,
-                "route": route,
-                "route_id": route_id,
-                "seed": seed,
-                "viz_path": viz_path,
-                "result_file": result_file,
-                "log_file": log_file,
-                "err_file": err_file,
-                "job_file": job_file,
-                "tries": cfg["tries"]
-            }
-
-            job_queue.append(job)
-
-# %%
-carla_world_ports = set(range(10000, 20000, 50))
-carla_streaming_ports = set(range(20000, 30000, 50))
-carla_tm_ports = set(range(30000, 40000, 50))
-
-# %%
-jobs = len(job_queue)
-progress = tqdm(total = jobs)
-partition_name = "2080-galvani"
-while job_queue:
-    kill_dead_jobs(job_queue)
-    job_queue = filter_completed(job_queue)
-
-    progress.update(jobs - len(job_queue) - progress.n)
-
-    running_jobs = get_running_jobs()
-
-    used_ports = set()
-    for job in job_queue:
-        if "job_id" in job and job["job_id"] in running_jobs:
-            used_ports.update(job["ports"])
-
-    with open('max_num_jobs.txt', 'r', encoding='utf-8') as f:
-        max_num_parallel_jobs = int(f.read())
-
-    if len(running_jobs) >= max_num_parallel_jobs:
-        time.sleep(5)
-        continue
-
-    for job in job_queue:
-        if job["tries"] <= 0:
-            continue
-
-        if "job_id" in job and job["job_id"] in running_jobs: # Das funktioniert nicht wenn man neu startet...
-            continue
-
-        if os.path.exists(job["log_file"]):
-            with open(job["log_file"], "r") as f:
-                job_id = f.readline().strip().replace("JOB ID ", "")
-                if job_id in running_jobs:
-                    print(f"{job['log_file']} already started.")
-                    continue
-
-        # Need to submit this job
-        # Make bash file:
-        carla_world_port_start = next(iter(carla_world_ports.difference(used_ports)))
-        carla_streaming_port_start = next(iter(carla_streaming_ports.difference(used_ports)))
-        carla_tm_port_start = next(iter(carla_tm_ports.difference(used_ports)))
-
-        if job["cfg"]["benchmark"].lower() == "bench2drive":
-            bash_file_bench2drive(job, carla_tm_port_start, carla_world_port_start, partition_name)
-            job["ports"] = {carla_world_port_start, carla_tm_port_start}
-        else:
-            raise NotImplementedError(f"Benchmark {job['cfg']['benchmark']} not implemented.")
-
-        # submit
-        shutil.rmtree(job["viz_path"])
-        os.mkdir(job["viz_path"])
-        job_id = subprocess.check_output(f'sbatch {job["job_file"]}', shell=True).decode('utf-8').strip().rsplit(' ', maxsplit=1)[-1]
-        
-        job["job_id"] = job_id
-        job["tries"] -= 1
-
-        print(f'submit {job["job_file"]}')
-        print(len(job_queue))
-        break
-
-    time.sleep(10)
+if __name__ == "__main__":
+    main()

@@ -86,18 +86,27 @@ class VectorInputAdaptor(nn.Module):
         return x
 
 class DrivingAdaptor(nn.Module):
-    def __init__(self, 
-                hidden_size: int, 
-                mlp_dim=256, 
-                predict_route_as_wps=False, 
+    def __init__(self,
+                hidden_size: int,
+                mlp_dim=256,
+                predict_route_as_wps=False,
                 speed_wps_mode=False,
+                predict_control=False,
             ):
         super().__init__()
         self.heads = {}
         self.order = []
+        self.queries = {}
+        self.sizes = {}
+        # scalar_heads: heads that produce a single scalar (no cumsum, shape [B, 1, 1])
+        self.scalar_heads: set = set()
 
         self.speed_wps_mode = speed_wps_mode
         self.predict_route_as_wps = predict_route_as_wps
+        self.predict_control = predict_control
+
+        self.dt = 0.2
+        self.lambda_vel = 0.2
 
         if predict_route_as_wps:
             self.future_waypoints = 20
@@ -105,9 +114,9 @@ class DrivingAdaptor(nn.Module):
             self.route_head = nn.Sequential(
                 nn.Linear(hidden_size, mlp_dim), nn.SiLU(True), nn.Linear(mlp_dim, 2, bias=False)
             )
-            
-            self.queries = {'route': self.query_embeds_wps}
-            self.sizes = {'route': self.future_waypoints}
+
+            self.queries['route'] = self.query_embeds_wps
+            self.sizes['route'] = self.future_waypoints
             self.heads["route"] = self.route_head
             self.order.append('route')
 
@@ -126,6 +135,29 @@ class DrivingAdaptor(nn.Module):
         self.queries['speed_wps'] = self.query_embeds_speed
         self.sizes['speed_wps'] = self.future_speed_waypoints
         self.order.append('speed_wps')
+
+        if predict_control:
+            # target_speed head: predicts current target speed (m/s), single scalar token
+            self.query_embeds_target_speed = nn.Parameter(0.02 * torch.randn((1, 1, hidden_size)))
+            self.target_speed_head = nn.Sequential(
+                nn.Linear(hidden_size, mlp_dim), nn.SiLU(True), nn.Linear(mlp_dim, 1, bias=False)
+            )
+            self.queries['target_speed'] = self.query_embeds_target_speed
+            self.sizes['target_speed'] = 1
+            self.heads["target_speed"] = self.target_speed_head
+            self.order.append('target_speed')
+            self.scalar_heads.add('target_speed')
+
+            # angle head: predicts current steering angle (radians), single scalar token
+            self.query_embeds_angle = nn.Parameter(0.02 * torch.randn((1, 1, hidden_size)))
+            self.angle_head = nn.Sequential(
+                nn.Linear(hidden_size, mlp_dim), nn.SiLU(True), nn.Linear(mlp_dim, 1, bias=False)
+            )
+            self.queries['angle'] = self.query_embeds_angle
+            self.sizes['angle'] = 1
+            self.heads["angle"] = self.angle_head
+            self.order.append('angle')
+            self.scalar_heads.add('angle')
 
 
     def forward(self, 
@@ -153,7 +185,7 @@ class DrivingAdaptor(nn.Module):
         return {"inputs": inputs, "inputs_mask": inputs_mask}
 
     def get_predictions(
-        self, 
+        self,
         features: Tensor
     ) -> Dict:
 
@@ -163,20 +195,51 @@ class DrivingAdaptor(nn.Module):
             size = self.sizes[input_type]
 
             feature = features[:, current_index: current_index + size]
-            prediction = self.heads[input_type](feature).cumsum(1)
+            if input_type in self.scalar_heads:
+                # scalar head: shape [B, 1, 1] -> squeeze to [B]
+                prediction = self.heads[input_type](feature).squeeze(-1).squeeze(-1)
+            elif input_type == 'speed_wps' and self.speed_wps_mode == '1d':
+                prediction = self._speed_wps_1d_forward(feature)
+            else:
+                prediction = self.heads[input_type](feature).cumsum(1)
 
             predictions[input_type] = prediction
             current_index += size
-        
+
         return predictions
 
+
+    def _speed_wps_1d_forward(self, features: Tensor) -> Tensor:
+        raw = self.speed_wps_head(features)       # [B, T, 1]
+        delta_s = F.softplus(raw - 1.0)           # non-negative step distances
+        return delta_s.cumsum(dim=1)              # [B, T, 1] cumulative progress
+
+    def _speed_wps_1d_loss(self, pred_s: Tensor, gt_s: Tensor) -> Tensor:
+        B, T, _ = pred_s.shape
+        dt = self.dt
+
+        # horizon decay: near steps weighted more
+        t = torch.arange(T, device=pred_s.device).float()
+        w = torch.exp(-0.15 * t).view(1, T, 1)
+
+        L_progress = (w * F.smooth_l1_loss(pred_s, gt_s, reduction='none')).mean(dim=[1, 2])
+
+        pred_ds = torch.cat([pred_s[:, :1], pred_s[:, 1:] - pred_s[:, :-1]], dim=1)
+        gt_ds   = torch.cat([gt_s[:, :1],   gt_s[:, 1:]  - gt_s[:, :-1]],   dim=1)
+        L_velocity = F.smooth_l1_loss(pred_ds / dt, gt_ds / dt, reduction='none').mean(dim=[1, 2])
+
+        return L_progress + self.lambda_vel * L_velocity
+
+    # Scale factor applied to angle GT to balance magnitude with other losses.
+    # angle is ~±0.1 rad, scaling by 20 brings it to ~±2, comparable to waypoint deltas.
+    ANGLE_SCALE = 20.0
 
     def compute_loss(
         self, adaptor_features: Tensor, _inputs: Dict[str, Tensor], example: DrivingExample
     ) -> Dict[str, Tuple[Tensor, Tensor]]:
         label = example.driving_label
         assert label is not None
-        
+
         if self.predict_route_as_wps:
             label_route = label.route_adjusted
         else:
@@ -185,23 +248,34 @@ class DrivingAdaptor(nn.Module):
         if self.speed_wps_mode == '2d':
             label_speed_wps = label.waypoints[:, : self.future_speed_waypoints]
         elif self.speed_wps_mode == '1d':
-            label_speed_wps = label.waypoints_1d
+            label_speed_wps = label.waypoints_1d[:, :, :1]   # [B, T, 1], drop zero-padding column
         else:
             label_speed_wps = None
+
+        if self.predict_control:
+            label_target_speed = label.target_speed  # [B]
+            label_angle = label.angle * self.ANGLE_SCALE  # [B], scaled for magnitude alignment
 
         current_index = 0
         loss_dict = {}
         for i, input_type in enumerate(self.order):
             size = self.sizes[input_type]
             features_tmp = adaptor_features[:, current_index: current_index + size]
-            label = locals()[f'label_{input_type}']
+            lbl = locals()[f'label_{input_type}']
 
-            prediction = self.heads[input_type](features_tmp).cumsum(1)
-            loss = F.mse_loss(prediction, label, reduction="none").sum(-1).mean(-1)
+            if input_type in self.scalar_heads:
+                prediction = self.heads[input_type](features_tmp).squeeze(-1).squeeze(-1)  # [B]
+                loss = F.smooth_l1_loss(prediction, lbl, reduction="none")  # [B]
+            elif input_type == 'speed_wps' and self.speed_wps_mode == '1d':
+                prediction = self._speed_wps_1d_forward(features_tmp)
+                loss = self._speed_wps_1d_loss(prediction, lbl)
+            else:
+                prediction = self.heads[input_type](features_tmp).cumsum(1)
+                loss = F.smooth_l1_loss(prediction, lbl, reduction="none").sum(-1).mean(-1)
 
             loss_dict[f"{input_type}_loss"] = (loss, torch.ones_like(loss, dtype=torch.long))
             loss_dict[f"{input_type}_prediction"] = prediction
-            loss_dict[f"{input_type}_label"] = label
+            loss_dict[f"{input_type}_label"] = lbl
             current_index += size
 
         return loss_dict

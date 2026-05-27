@@ -8,7 +8,7 @@ from hydra.core.config_store import ConfigStore
 class LLaVAnextEncoderConfig:
     variant: str = "llava-hf/llava-v1.6-mistral-7b-hf"
     embed_dim: int = 512
-    freeze: bool = False
+    freeze: bool = True
     downsample_feature_grid_factor: Optional[int] = 2
     use_global_img: bool = False
 
@@ -18,7 +18,7 @@ class LLaVAnextEncoderConfig:
 class ResnetEncoderConfig:
     variant: str = 'microsoft/resnet-34'
     embed_dim: int = 512
-    freeze: bool = False
+    freeze: bool = True
     downsample_feature_grid_factor: Optional[int] = 2
     use_global_img: bool = True
 
@@ -44,16 +44,18 @@ class DrivingModelConfig:
     betas: Tuple[float, float] = (0.9, 0.999)
     pct_start: float = 0.05
     speed_wps_mode: str = '2d'
-    predict_route_as_wps: bool = False
+    predict_route_as_wps: bool = True
     speed_as_input: bool = True
     new_layer_norm_minmax: bool = False
+    predict_control: bool = True
+    scheduler_type: str = "onecycle"
 
     _target_: str = "simlingo_base_training.models.driving.DrivingModel"
 
 
 @dataclass
 class DrivingDataModuleConfig:
-    batch_size: int = 16
+    batch_size: int = 24
     num_workers: int = 10
     data_path: str = "database/simlingo"
     bucket_path: str = "database/bucketsv2_simlingo"
@@ -88,7 +90,7 @@ class TrainConfig:
     data_module: Any
 
     seed: int = 42
-    gpus: int = 8
+    gpus: int = 1
 
     resume: bool = False
     resume_path: Optional[str] = None
@@ -111,9 +113,9 @@ class TrainConfig:
     
 
     # max_steps: int = 100_000
-    max_epochs: int = 20
+    max_epochs: int = 30
     precision: str = "16-mixed"
-    strategy: str = "deepspeed_stage_2" # deepspeed_stage_2 ddp
+    strategy: str = "auto" # deepspeed_stage_2 ddp  ############################################"deepspeed_stage_2"換成"auto"
     accumulate_grad_batches: int = 1
     devices: Union[str, int] = "auto"
     # val_check_interval: int = 5000
