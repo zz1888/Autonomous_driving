@@ -184,20 +184,27 @@ class DrivingModel(pl.LightningModule):
         img = driving_input.camera_images #[:, 0, :, :, :] # only use the front camera
         map_route = driving_input.map_route
 
-        vision_embeds, _ = self.vision_model.forward(img, image_sizes=driving_input.image_sizes)
+        vision_outputs = self.vision_model.forward(img, image_sizes=driving_input.image_sizes)
+        if len(vision_outputs) == 3:
+            vision_embeds, _, motion_tokens = vision_outputs
+        else:
+            vision_embeds, _ = vision_outputs
+            motion_tokens = None
         attention_mask = None
 
         # n_frames, n_tokens, channels = sizes
         vision_embeds = self.language_projection(vision_embeds)
-        # channels = vision_embeds.size(2)
-        BS = vision_embeds.size(0)
+        if motion_tokens is not None:
+            motion_tokens = self.language_projection(motion_tokens)
         route = self.route_encoder.forward(map_route)
+        prefix_embeds = [vision_embeds]
+        if motion_tokens is not None:
+            prefix_embeds.append(motion_tokens)
         if self.speed_as_input:
             speed = self.speed_encoder.forward(driving_input.vehicle_speed)
-
-            input_embeds = torch.cat((vision_embeds, speed, route), dim=1)
-        else:
-            input_embeds = torch.cat((vision_embeds, route), dim=1)
+            prefix_embeds.append(speed)
+        prefix_embeds.append(route)
+        input_embeds = torch.cat(prefix_embeds, dim=1)
 
         return input_embeds, attention_mask
 
@@ -231,6 +238,7 @@ class DrivingModel(pl.LightningModule):
 
         # log the loss
         self.log("train/loss", output.loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        self.log_motion_scale("train", batch.driving_input.camera_images.size(0))
 
         return {"loss": output.loss, "outputs": output}
 
@@ -240,8 +248,24 @@ class DrivingModel(pl.LightningModule):
 
         # log the loss
         self.log("val/loss", output.loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+        self.log_motion_scale("val", batch.driving_input.camera_images.size(0))
 
         return {"loss": output.loss, "outputs": output}
+
+    def log_motion_scale(self, split: str, batch_size: int):
+        motion_scale = getattr(self.vision_model, "motion_scale", None)
+        if motion_scale is None:
+            return
+        self.log(
+            f"{split}/motion_scale",
+            motion_scale.detach(),
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+            sync_dist=True,
+            batch_size=batch_size,
+        )
 
     def predict_step(self, batch: DrivingExample, _batch_idx: int = 0):
         loss_dict, pred_labels = self.forward_loss(batch, per_sample=True)

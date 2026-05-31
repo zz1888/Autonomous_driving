@@ -6,21 +6,23 @@ from transformers import LlavaNextProcessor
 from simlingo_base_training.models.encoder.llavanext_model import LingoLlavaNextModel
 
 
-class MotionGate(nn.Module):
-    def __init__(self, embed_dim: int):
+class MotionTokenEncoder(nn.Module):
+    def __init__(self, embed_dim: int, num_motion_tokens: int = 8):
         super().__init__()
-        self.gate = nn.Sequential(
+        self.num_motion_tokens = num_motion_tokens
+        self.encoder = nn.Sequential(
             nn.LayerNorm(embed_dim),
             nn.Linear(embed_dim, embed_dim // 4),
             nn.SiLU(),
-            nn.Linear(embed_dim // 4, 1),
+            nn.Linear(embed_dim // 4, embed_dim),
         )
-        nn.init.constant_(self.gate[-1].bias, -2.0)  # gate ≈ 0 at init
-        self.motion_scale = nn.Parameter(torch.tensor(0.1))
 
     def forward(self, diff: torch.Tensor) -> torch.Tensor:
-        gate = torch.sigmoid(self.gate(diff))  # [..., 1]
-        return self.motion_scale * gate
+        BS, num_cams, n_tokens, channels = diff.shape
+        motion = self.encoder(diff)
+        motion = motion.view(BS, num_cams * n_tokens, channels).transpose(1, 2)
+        motion = nn.functional.adaptive_avg_pool1d(motion, self.num_motion_tokens)
+        return motion.transpose(1, 2)
 
 
 class LLaVAnextEncoderModel(nn.Module):
@@ -49,7 +51,10 @@ class LLaVAnextEncoderModel(nn.Module):
         # Embeddings: BS, N_FRAMES, N_CAMS, N_PATCHES, EMBED_DIM
         self.temporal_encoding = nn.Parameter(0.02 * torch.randn(1, self.num_frames, 1, 1, embed_dim))
         self.camera_encoding = nn.Parameter(0.02 * torch.randn(1, 1, self.num_cameras, 1, embed_dim))
-        self.motion_gate = MotionGate(embed_dim)
+        self.motion_token_encoder = MotionTokenEncoder(embed_dim, num_motion_tokens=8)
+        self.motion_type_embedding = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.motion_position_embedding = nn.Parameter(0.02 * torch.randn(1, 8, embed_dim))
+        self.motion_scale = nn.Parameter(torch.tensor(1.0))
 
         # freeze the paramaeters -> no gradient updates
         if freeze:
@@ -61,9 +66,12 @@ class LLaVAnextEncoderModel(nn.Module):
             self.projection.bias.requires_grad = True
             self.temporal_encoding.requires_grad = True
             self.camera_encoding.requires_grad = True
-            # MotionGate is always trainable
-            for p in self.motion_gate.parameters():
+            # Motion tokens are always trainable.
+            for p in self.motion_token_encoder.parameters():
                 p.requires_grad = True
+            self.motion_type_embedding.requires_grad = True
+            self.motion_position_embedding.requires_grad = True
+            self.motion_scale.requires_grad = True
 
     def _encode_frames(self, pixel_values: torch.Tensor, image_sizes, num_frames: int, num_cams: int) -> torch.Tensor:
         """Encode pixel_values and project. Returns [BS, num_frames, num_cams, N_tokens, D]."""
@@ -109,16 +117,20 @@ class LLaVAnextEncoderModel(nn.Module):
             )  # [BS, 1, num_cams, N, D]
             feat_curr_sq = feat_curr[:, 0]  # [BS, num_cams, N, D]
 
-            # MotionGate temporal fusion
             diff = feat_curr_sq - feat_prev  # [BS, num_cams, N, D]
-            gate_weight = self.motion_gate(diff)  # [BS, num_cams, N, 1]
-            feat_temporal = feat_curr_sq + gate_weight * diff  # [BS, num_cams, N, D]
+            motion_tokens = self.motion_token_encoder(diff)  # [BS, K, D]
+            motion_tokens = (
+                self.motion_scale * motion_tokens
+                + self.motion_type_embedding
+                + self.motion_position_embedding
+            )
 
             # Reshape to [BS, 1, num_cams, N, D] for downstream compatibility
-            patch_embeddings = feat_temporal.unsqueeze(1)
+            patch_embeddings = feat_curr_sq.unsqueeze(1)
             out_frames = 1
         else:
             patch_embeddings = self._encode_frames(pixel_values, image_sizes, num_frames, num_cams)
+            motion_tokens = None
             out_frames = num_frames
 
         input_sequence = patch_embeddings
@@ -130,7 +142,7 @@ class LLaVAnextEncoderModel(nn.Module):
             input_sequence = input_sequence + self.camera_encoding
 
         embeds = input_sequence.view(BS, -1, channels)
-        return embeds, (out_frames, n_tokens, channels)
+        return embeds, (out_frames, n_tokens, channels), motion_tokens
 
 
 

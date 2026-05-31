@@ -4,12 +4,12 @@ defaults:
   - /model/vision_model: llavanext
 
 model:
-  lr: 1e-5
-  vision_lr: 1e-5
+  lr: 1e-4
+  vision_lr: 1e-4
   predict_route_as_wps: True
   speed_wps_mode: '1d'
   predict_control: True
-  scheduler_type: cosine
+  scheduler_type: onecycle
   language_model:
     variant: x-small
     lora: False
@@ -32,12 +32,12 @@ data_module:
   img_shift_augmentation_prob: 0.5
   image_enhancing: True
 
-max_epochs: 10
+max_epochs: 30
 seed: 42
 gpus: 1
 val_every_n_epochs: 1
-name: simlingo_base_seed_42_finetune_10ep_1e-5_cosine
-checkpoint: /home/mediacore/simlingo/outputs/2026_05_13_13_24_08_simlingo_base_seed_42/checkpoints/last.ckpt
+name: simlingo_base_seed_42_change_the_motion
+checkpoint: null
 
 hydra:
   run:

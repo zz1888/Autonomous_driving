@@ -33,6 +33,8 @@ def configure_params_groups(model: nn.Module, param_groups: Sequence[ParamGroup]
         "positional_encoding",
         "temporal_encoding",
         "camera_encoding",
+        "motion_type_embedding",
+        "motion_position_embedding",
         "sink_token",
         "egoposition_head",
         "route_head",

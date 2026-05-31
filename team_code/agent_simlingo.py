@@ -190,7 +190,11 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             state_dict = state_dict['state_dict']
         if isinstance(state_dict, dict) and any(k.startswith('model.') for k in state_dict.keys()):
             state_dict = {k.replace('model.', '', 1): v for k, v in state_dict.items()}
-        self.model.load_state_dict(state_dict)
+        missing, unexpected = self.model.load_state_dict(state_dict, strict=False)
+        if missing:
+            print(f"[checkpoint] Missing keys (random init): {missing}", flush=True)
+        if unexpected:
+            print(f"[checkpoint] Unexpected keys (ignored): {unexpected}", flush=True)
         self.iter = self.config_path.split("epoch=")[-1].split("/")[0]
         self.session = self.config_path.split("/")[-4]
         
