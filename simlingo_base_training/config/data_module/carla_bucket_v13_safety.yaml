@@ -1,0 +1,27 @@
+defaults:
+  - driving
+
+train_partitions:
+  all: 0.061
+  acceleration_negative_5: 0.025
+  acceleration_negative_1: 0.025
+  acceleration_positive_1: 0.025
+  acceleration_positive_5: 0.020
+  lateral_control_1_2: 0.100
+  lateral_control_higher_5: 0.100
+  start_from_stop: 0.060
+  vehicle_front: 0.055
+  vehicle_side: 0.090
+  leading_object_vehicle: 0.090
+  leading_object_traffic.stop: 0.060
+  leading_object_traffic.traffic_light: 0.060
+  leading_object_walker: 0.055
+  changed_route: 0.070
+  parkinglane: 0.005
+  vehicle: 0.030
+  walker_hazard: 0.018
+  target_speed_0.5: 0.020
+  junction: 0.008
+  red_light: 0.010
+  brake: 0.008
+  vehicle_dissapears: 0.005

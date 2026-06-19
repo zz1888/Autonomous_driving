@@ -1,0 +1,52 @@
+# @package _global_
+defaults:
+  - /data_module: carla_bucket_v12
+  - /model/vision_model: dinov2
+
+model:
+  lr: 1e-4
+  vision_lr: 1e-4
+  predict_route_as_wps: True
+  speed_wps_mode: '1d'
+  predict_control: True
+  scheduler_type: onecycle
+  language_model:
+    variant: x-small
+    lora: False
+    gradient_checkpointing: True
+    _target_: simlingo_base_training.models.language_model.llama.Llama
+  vision_model:
+    variant: facebook/dinov2-large
+    embed_dim: 1024
+    freeze: True
+    downsample_feature_grid_factor: 2
+    num_motion_tokens: 8
+
+data_module:
+  data_path: database/simlingo
+  bucket_path: database/bucketsv2_simlingo
+  encoder: dinov2
+  batch_size: 48
+  num_workers: 8
+  val_num_workers: 2
+  route_as: target_point
+  hist_len: 2
+  cut_bottom_quarter: False
+  use_global_img: False
+
+  img_shift_augmentation: True
+  img_shift_augmentation_prob: 0.5
+  image_enhancing: True
+
+max_epochs: 30
+seed: 42
+gpus: 1
+val_every_n_epochs: 1
+name: simlingo_base_seed_42_dinov2_l14_batch48
+checkpoint: null
+resume: True
+resume_path: /home/mediacore/simlingo/outputs/2026_06_11_00_09_00_simlingo_base_seed_42_dinov2_l14_batch64_resume/checkpoints/last.ckpt
+
+hydra:
+  run:
+    dir: outputs/${wandb_name}_${name}
