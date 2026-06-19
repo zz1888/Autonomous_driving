@@ -21,6 +21,7 @@ import cv2
 import hydra
 import numpy as np
 import torch
+import torch.nn.functional as F
 import ujson
 from filterpy.kalman import MerweScaledSigmaPoints
 from filterpy.kalman import UnscentedKalmanFilter as UKF
@@ -159,10 +160,13 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         self.processor = processor
         if 'tokenizer' in processor.__dict__:
                 self.tokenizer = processor.tokenizer
-        else:
+        elif hasattr(processor, "add_special_tokens"):
                 self.tokenizer = processor
-        self.tokenizer.add_special_tokens({'additional_special_tokens': ['<WAYPOINTS>','<WAYPOINTS_DIFF>', '<ORG_WAYPOINTS_DIFF>', '<ORG_WAYPOINTS>', '<WAYPOINT_LAST>', '<ROUTE>', '<ROUTE_DIFF>', '<TARGET_POINT>']})
-        self.tokenizer.padding_side = "left"
+        else:
+                self.tokenizer = None
+        if self.tokenizer is not None:
+            self.tokenizer.add_special_tokens({'additional_special_tokens': ['<WAYPOINTS>','<WAYPOINTS_DIFF>', '<ORG_WAYPOINTS_DIFF>', '<ORG_WAYPOINTS>', '<WAYPOINT_LAST>', '<ROUTE>', '<ROUTE_DIFF>', '<TARGET_POINT>']})
+            self.tokenizer.padding_side = "left"
         # llm_tokenizer = AutoTokenizer.from_pretrained(cfg.model.language_model.variant)
         cache_dir = f"pretrained/{(cfg.model.vision_model.variant.split('/')[1])}"
         default_dtype = torch.get_default_dtype()
@@ -438,6 +442,24 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             new_height = processed_image.shape[3]
             new_width = processed_image.shape[4]
             processed_image = processed_image.view(1, T, N, num_patches, C, new_height, new_width)
+        elif self.is_base_model and self.cfg.data_module.encoder == 'dinov2':
+            image_history = list(self.image_buffer)
+            temporal_images = []
+            for hist_idx in range(self.hist_len):
+                offset = (self.hist_len - 1 - hist_idx) * self.history_stride
+                buffer_idx = len(image_history) - 1 - offset
+                if buffer_idx < 0:
+                    buffer_idx = 0
+                temporal_images.append(image_history[buffer_idx])
+            rgbs = np.stack(temporal_images, axis=0)
+
+            T, N, C, H, W = rgbs.shape
+            processed_image = torch.tensor(rgbs).view(T * N, C, H, W).float() / 255.0
+            processed_image = F.interpolate(processed_image, size=(336, 672), mode="bilinear", align_corners=False)
+            mean = processed_image.new_tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+            std = processed_image.new_tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+            processed_image = (processed_image - mean) / std
+            processed_image = processed_image.view(1, T, N, 1, C, 336, 672)
         elif 'internvl2' in self.cfg.model.vision_model.variant.lower():
             T, C, H, W = rgbs.shape
             transform = build_transform(input_size=448)
@@ -530,12 +552,13 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             target_points = torch.from_numpy(target_points_np).to(self.device, dtype=torch.float32).unsqueeze(0)
             result['route'] = target_points
             
-            placeholder_values = {'<TARGET_POINT>': target_points_np}
-            tmp = {}
-            for key, value in placeholder_values.items():
-                    token_nr_key = self.tokenizer.convert_tokens_to_ids(key)
-                    tmp[token_nr_key] = value
-            placeholder_batch_list.append(tmp)
+            if self.tokenizer is not None:
+                placeholder_values = {'<TARGET_POINT>': target_points_np}
+                tmp = {}
+                for key, value in placeholder_values.items():
+                        token_nr_key = self.tokenizer.convert_tokens_to_ids(key)
+                        tmp[token_nr_key] = value
+                placeholder_batch_list.append(tmp)
             
             prompt_tp = "Target waypoint: <TARGET_POINT><TARGET_POINT>."
             
@@ -973,7 +996,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             del self.model
         if hasattr(self, "config"):
             del self.config
-        if getattr(self, "is_base_model", False) and self.cfg.data_module.encoder == 'llavanext' and hasattr(self, "processor"):
+        if getattr(self, "is_base_model", False) and hasattr(self, "processor"):
             del self.processor
 
 # Filter Functions

@@ -12,11 +12,11 @@ REPO_ROOT  = "/home/mediacore/simlingo"
 CARLA_ROOT = os.path.expanduser("~/software/carla0915")
 
 AGENT_FILE  = f"{REPO_ROOT}/team_code/agent_simlingo.py"
-CHECKPOINT  = f"{REPO_ROOT}/outputs/2026_05_23_00_30_24_simlingo_base_seed_42_finetune_10ep_1e-5_cosine/checkpoints/last.ckpt+bench2drive_test"
+CHECKPOINT  = f"{REPO_ROOT}/outputs/2026_06_17_11_32_36_simlingo_base_seed_42_dinov2_l14_batch64_resume/checkpoints/last.ckpt+bench2drive_test"
 ROUTE_PATH  = "/home/mediacore/simlingo/leaderboard/data/bench2drive_split"
 OUT_ROOT    = f"{REPO_ROOT}/eval_results/Bench2Drive"
 EVALUATOR   = f"{REPO_ROOT}/Bench2Drive/leaderboard/leaderboard/leaderboard_evaluator.py"
-EVAL_NAME   = Path(CHECKPOINT.split("+", 1)[0]).parents[1].name + "_eval_stride5"
+EVAL_NAME   = Path(CHECKPOINT.split("+", 1)[0]).parents[1].name + "_eval_bench2drive220"
 
 SEED    = 42
 PORT    = 2000
@@ -25,6 +25,7 @@ TIMEOUT = 600
 MAX_RETRIES = 3
 MONITOR_INTERVAL = 1.0
 SKIP_COMPLETED = True
+ROUTE_IDS_TO_RUN = None
 FATAL_PATTERNS = (
     "Signal 11 caught",
     "CommonUnixCrashHandler: Signal=11",
@@ -247,6 +248,11 @@ def run_route(route_path, result_file, log_file, env, route_id):
 
 def main():
     routes = sorted(Path(ROUTE_PATH).glob("*.xml"))
+    if ROUTE_IDS_TO_RUN is not None:
+        routes = [
+            route for route in routes
+            if route.stem.split("_")[-1].zfill(3) in ROUTE_IDS_TO_RUN
+        ]
     if not routes:
         print(f"No route XML files found in {ROUTE_PATH}")
         sys.exit(1)

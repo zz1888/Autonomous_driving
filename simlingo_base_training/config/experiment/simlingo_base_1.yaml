@@ -20,8 +20,9 @@ model:
 data_module:
   data_path: database/simlingo
   bucket_path: database/bucketsv2_simlingo
-  batch_size: 42
+  batch_size: 40
   num_workers: 10
+  val_num_workers: 0
   route_as: target_point
   hist_len: 2
   cut_bottom_quarter: False
@@ -36,8 +37,10 @@ max_epochs: 30
 seed: 42
 gpus: 1
 val_every_n_epochs: 1
-name: simlingo_base_seed_42_change_the_motion
+name: simlingo_base_seed_42_change_the_motion_resume
 checkpoint: null
+resume: True
+resume_path: /home/mediacore/simlingo/outputs/2026_05_29_18_33_16_simlingo_base_seed_42_change_the_motion/checkpoints/last.ckpt
 
 hydra:
   run:

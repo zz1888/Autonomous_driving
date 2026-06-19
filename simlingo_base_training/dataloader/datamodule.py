@@ -5,6 +5,7 @@ import hydra
 import line_profiler
 import numpy as np
 import torch
+import torch.nn.functional as torch_F
 from pytorch_lightning import LightningDataModule
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, LlavaNextProcessor
@@ -33,7 +34,7 @@ class DataModule(LightningDataModule):
 
         self.cfg = cfg
        
-        if 'resnet' in self.encoder_variant:
+        if 'resnet' in self.encoder_variant or 'dinov2' in self.encoder_variant:
             self.processor = None
         
         elif self.encoder_variant is not None:
@@ -151,10 +152,11 @@ class DataModule(LightningDataModule):
             self.val_dataset,
             batch_size=self.batch_size,
             shuffle=False,
-            num_workers=0,
+            num_workers=getattr(self, "val_num_workers", 0),
             drop_last=True,
             collate_fn=self.dl_collate_fn,
             pin_memory=False,
+            prefetch_factor=2 if getattr(self, "val_num_workers", 0) > 0 else None,
         )
 
 
@@ -190,6 +192,14 @@ class DataModule(LightningDataModule):
             new_height = images_pixel.shape[3]
             new_width = images_pixel.shape[4]
             images_pixel = images_pixel.view(B, T, N, num_patches, C, new_height, new_width)
+        elif self.encoder == 'dinov2':
+            images_pixel = torch.tensor(np.asarray([data[i]["rgb"] for i in range(len(data))])).float()
+            images_pixel = images_pixel.view(B * T * N, C, H, W) / 255.0
+            images_pixel = torch_F.interpolate(images_pixel, size=(336, 672), mode="bilinear", align_corners=False)
+            mean = images_pixel.new_tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+            std = images_pixel.new_tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+            images_pixel = (images_pixel - mean) / std
+            images_pixel = images_pixel.view(B, T, N, 1, C, 336, 672)
         else:
             images_pixel = torch.tensor(np.asarray([data[i]["rgb"] for i in range(len(data))])).half()
 

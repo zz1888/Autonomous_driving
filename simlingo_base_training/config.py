@@ -26,9 +26,22 @@ class ResnetEncoderConfig:
 
 
 @dataclass
+class DINOv2EncoderConfig:
+    variant: str = "facebook/dinov2-large"
+    embed_dim: int = 1024
+    freeze: bool = True
+    downsample_feature_grid_factor: Optional[int] = 2
+    use_global_img: bool = False
+    num_motion_tokens: int = 8
+
+    _target_: str = "simlingo_base_training.models.encoder.dinov2.DINOv2EncoderModel"
+
+
+@dataclass
 class LanguageModelConfig:
     variant: str = "x-small"
     lora: bool = False
+    gradient_checkpointing: bool = False
     _target_: str = "simlingo_base_training.models.language_model.llama.Llama"
 
 
@@ -57,6 +70,7 @@ class DrivingModelConfig:
 class DrivingDataModuleConfig:
     batch_size: int = 24
     num_workers: int = 10
+    val_num_workers: int = 0
     data_path: str = "database/simlingo"
     bucket_path: str = "database/bucketsv2_simlingo"
     encoder: str = "llavanext" # "resnet"
@@ -132,6 +146,7 @@ def register_configs():
     cs.store(group="model", name="driving", node=DrivingModelConfig)
     cs.store(group="model/vision_model", name="llavanext", node=LLaVAnextEncoderConfig)
     cs.store(group="model/vision_model", name="resnet", node=ResnetEncoderConfig)
+    cs.store(group="model/vision_model", name="dinov2", node=DINOv2EncoderConfig)
     cs.store(group="model/language_model", name="llm", node=LanguageModelConfig)
 
 

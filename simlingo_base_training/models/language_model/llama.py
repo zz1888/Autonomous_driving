@@ -45,7 +45,7 @@ PRETRAINED_VARIANTS: Dict[str, str] = {
 
 
 class Llama(nn.Module):
-    def __init__(self, variant: str, lora: bool = True):
+    def __init__(self, variant: str, lora: bool = True, gradient_checkpointing: bool = False):
         super().__init__()
 
         pretrained_id = PRETRAINED_VARIANTS.get(variant)
@@ -81,6 +81,12 @@ class Llama(nn.Module):
             )
             self.model = get_peft_model(self.model, peft_config)
             self.model.print_trainable_parameters()
+
+        if gradient_checkpointing:
+            if hasattr(self.model, "gradient_checkpointing_enable"):
+                self.model.gradient_checkpointing_enable()
+            if hasattr(self.model.config, "use_cache"):
+                self.model.config.use_cache = False
 
         self.vocab_size = self.model.config.vocab_size
         self.hidden_size = self.model.config.hidden_size
