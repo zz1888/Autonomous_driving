@@ -47,7 +47,14 @@ def main(cfg: TrainConfig):
             ckpt = torch.load(cfg.checkpoint, map_location="cpu")
             # Lightning saves full checkpoint; extract state_dict if present
             state_dict = ckpt['state_dict'] if 'state_dict' in ckpt else ckpt
-        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        # Drop keys with shape mismatch so they get random init instead of crashing
+        model_state = model.state_dict()
+        filtered = {k: v for k, v in state_dict.items()
+                    if k not in model_state or v.shape == model_state[k].shape}
+        skipped = [k for k in state_dict if k in model_state and state_dict[k].shape != model_state[k].shape]
+        if skipped:
+            print(f"[checkpoint] Shape mismatch (will use random init): {skipped}")
+        missing, unexpected = model.load_state_dict(filtered, strict=False)
         if missing:
             print(f"[checkpoint] Missing keys (will use random init): {missing}")
         if unexpected:

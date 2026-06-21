@@ -20,7 +20,7 @@ model:
     embed_dim: 1024
     freeze: True
     downsample_feature_grid_factor: 2
-    num_motion_tokens: 8
+    num_motion_tokens: 16
 
 data_module:
   data_path: database/simlingo

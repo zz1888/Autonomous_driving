@@ -8,19 +8,22 @@ class MotionTokenEncoder(nn.Module):
     def __init__(self, embed_dim: int, num_motion_tokens: int = 8):
         super().__init__()
         self.num_motion_tokens = num_motion_tokens
+        self.embed_dim = embed_dim
         self.encoder = nn.Sequential(
             nn.LayerNorm(embed_dim),
             nn.Linear(embed_dim, embed_dim // 4),
             nn.SiLU(),
             nn.Linear(embed_dim // 4, embed_dim),
         )
+        self.query = nn.Parameter(torch.randn(num_motion_tokens, embed_dim) * 0.02)
 
     def forward(self, diff: torch.Tensor) -> torch.Tensor:
         bs, num_cams, n_tokens, channels = diff.shape
-        motion = self.encoder(diff)
-        motion = motion.view(bs, num_cams * n_tokens, channels).transpose(1, 2)
-        motion = F.adaptive_avg_pool1d(motion, self.num_motion_tokens)
-        return motion.transpose(1, 2)
+        motion = self.encoder(diff)                                    # [B, C, N, D]
+        motion = motion.view(bs, num_cams * n_tokens, channels)        # [B, N, D]
+        scale = self.embed_dim ** 0.5
+        attn = torch.softmax(motion @ self.query.T / scale, dim=1)    # [B, N, K]
+        return torch.einsum('bnk,bnd->bkd', attn, motion)             # [B, K, D]
 
 
 class DINOv2EncoderModel(nn.Module):

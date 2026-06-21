@@ -42,6 +42,7 @@ def configure_params_groups(model: nn.Module, param_groups: Sequence[ParamGroup]
         "curvature_rate_head",
         "query_embeds",
         "motion_scale",
+        "motion_token_encoder.query",
     )
 
     decay_params = set()
