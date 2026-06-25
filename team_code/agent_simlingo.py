@@ -64,6 +64,7 @@ def get_entry_point():
 DEBUG = False # saves images during evaluation
 HD_VIZ = False
 USE_UKF = True
+FORCE_WAYPOINT_SPEED = True
 
 class LingoAgent(autonomous_agent.AutonomousAgent):
     """
@@ -149,6 +150,9 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         with open(self.config_load_path, 'r') as file:
             cfg = OmegaConf.load(file)
         self.cfg = cfg
+        if FORCE_WAYPOINT_SPEED and "predict_control" in self.cfg.model:
+            self.cfg.model.predict_control = False
+            print("[control] FORCE_WAYPOINT_SPEED=True -> predict_control disabled for eval", flush=True)
         self.cfg.model.vision_model.use_global_img = cfg.data_module.use_global_img
         model_target = str(self.cfg.model.get("_target_", ""))
         self.is_base_model = "simlingo_base_training" in model_target

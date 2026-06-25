@@ -12,11 +12,11 @@ REPO_ROOT  = "/home/mediacore/simlingo"
 CARLA_ROOT = os.path.expanduser("~/software/carla0915")
 
 AGENT_FILE  = f"{REPO_ROOT}/team_code/agent_simlingo.py"
-CHECKPOINT  = f"{REPO_ROOT}/outputs/2026_06_17_11_32_36_simlingo_base_seed_42_dinov2_l14_batch64_resume/checkpoints/last.ckpt+bench2drive_test"
+CHECKPOINT  = f"{REPO_ROOT}/outputs/2026_06_20_20_24_52_simlingo_base_seed_42_dinov2_l14_safety_v13_finetune_10ep/checkpoints/last.ckpt+bench2drive_test"
 ROUTE_PATH  = "/home/mediacore/simlingo/leaderboard/data/bench2drive_split"
 OUT_ROOT    = f"{REPO_ROOT}/eval_results/Bench2Drive"
 EVALUATOR   = f"{REPO_ROOT}/Bench2Drive/leaderboard/leaderboard/leaderboard_evaluator.py"
-EVAL_NAME   = Path(CHECKPOINT.split("+", 1)[0]).parents[1].name + "_eval_bench2drive220"
+EVAL_NAME   = Path(CHECKPOINT.split("+", 1)[0]).parents[1].name + "_waypoint_speed_seed42_eval_bench2drive220_rerun"
 
 SEED    = 42
 PORT    = 2000
@@ -57,9 +57,54 @@ def build_env(save_path):
 
 
 def kill_carla():
-    """Kill any leftover CarlaUE4 processes to free GPU memory."""
-    subprocess.run(["pkill", "-f", "CarlaUE4"], capture_output=True)
-    import time; time.sleep(3)
+    """Kill any leftover CarlaUE4 processes to free GPU memory.
+
+    A plain pkill can return before Unreal's crash handler and child process
+    have actually exited. Wait for the process list to become clean before the
+    next route attempt starts, otherwise two CARLA servers can overlap.
+    """
+    patterns = ("CarlaUE4", "CarlaUE4-Linux-Shipping")
+
+    def find_pids():
+        pids = set()
+        for pattern in patterns:
+            result = subprocess.run(
+                ["pgrep", "-f", pattern],
+                capture_output=True,
+                text=True,
+            )
+            for line in result.stdout.splitlines():
+                try:
+                    pid = int(line.strip())
+                except ValueError:
+                    continue
+                if pid != os.getpid():
+                    pids.add(pid)
+        return sorted(pids)
+
+    for pid in find_pids():
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        if not find_pids():
+            return
+        time.sleep(1)
+
+    for pid in find_pids():
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        if not find_pids():
+            return
+        time.sleep(1)
 
 
 def has_fatal_pattern(text):
@@ -166,6 +211,8 @@ def append_log(log_file, message):
 
 
 def run_route_attempt(route_path, result_file, log_file, env, attempt):
+    kill_carla()
+
     cmd = [
         sys.executable, "-u", EVALUATOR,
         f"--routes={route_path}",
