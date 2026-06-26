@@ -14,9 +14,12 @@ Generated from `eval_results/Bench2Drive/**/res/merged.json` and `merged_ability
 | seed_1 | 75.938 | 0.473 | 97.581 | 0.776 | 200 | 20 | 0.488 | 0.267 | 0.463 | 0.517 | 0.500 | 0.695 | historical baseline eval | unknown | unknown | unknown | unknown |
 | seed_2 | 74.779 | 0.477 | 99.262 | 0.750 | 217 | 3 | 0.473 | 0.467 | 0.463 | 0.467 | 0.400 | 0.568 | historical baseline eval | unknown | unknown | unknown | unknown |
 | seed_42 | 78.125 | 0.518 | 100.000 | 0.781 | 220 | 0 | 0.524 | 0.289 | 0.487 | 0.633 | 0.500 | 0.711 | single-frame target-speed baseline | 1 | No | Yes: target_speed + angle | target_speed + route |
-| 2026_06_20_20_24_52_simlingo_base_seed_42_dinov2_l14_safety_v13_finetune_10ep_waypoint_speed_seed42_eval_bench2drive220/seed_42 | 79.054 | 0.536 | 100.000 | 0.791 | 220 | 0 | 0.529* | 0.467 | 0.500 | 0.617 | 0.600 | 0.463 | DINOv2-L/14 K=16 safety FT, waypoint-speed control ablation | 2 | Yes | Yes: target_speed + angle; K=16 motion-token module | waypoint-derived speed + route |
+| 2026_06_17_11_32_36_simlingo_base_seed_42_dinov2_l14_batch64_resume_eval_bench2drive220/seed_42 | 79.000 | 0.527 | 100.000 | 0.790 | 220 | 0 | 0.526 | 0.533 | 0.475 | 0.567 | 0.500 | 0.553 | DINOv2-L/14 K=8 | 2 | Yes | Yes: target_speed + angle; K=8 motion-token module | target_speed + route |
+| 2026_06_20_20_24_52_simlingo_base_seed_42_dinov2_l14_safety_v13_finetune_10ep_eval_bench2drive220/seed_42 | 79.014 | 0.536 | 100.000 | 0.790 | 220 | 0 | 0.522 | 0.444 | 0.500 | 0.600 | 0.500 | 0.563 | DINOv2-L/14 K=16 safety FT | 2 | Yes | Yes: target_speed + angle; K=16 motion-token module | target_speed + route |
+| 2026_06_20_20_24_52_simlingo_base_seed_42_dinov2_l14_safety_v13_finetune_10ep_waypoint_speed_seed42_eval_bench2drive220/seed_42 | 79.054 | 0.536 | 100.000 | 0.791 | 220 | 0 | 0.557 | 0.467 | 0.500 | 0.617 | 0.600 | 0.600 | DINOv2-L/14 K=16 safety FT, waypoint-speed control ablation | 2 | Yes | Yes: target_speed + angle; K=16 motion-token module | waypoint-derived speed + route |
+| 2026_06_20_20_24_52_simlingo_base_seed_42_dinov2_l14_safety_v13_finetune_10ep_waypoint_speed_seed42_eval_bench2drive220_rerun/seed_42 | 81.437 | 0.568 | 100.000 | 0.814 | 220 | 0 | 0.564 | 0.556 | 0.512 | 0.650 | 0.500 | 0.600 | DINOv2-L/14 K=16 safety FT, waypoint-speed control rerun | 2 | Yes | Yes: target_speed + angle; K=16 motion-token module | waypoint-derived speed + route |
 
-`*` Ability for the waypoint-speed control ablation is an offline calculation using Bench2Drive ability groups and infraction-based success, without the CARLA junction-completion extra check for Traffic Signs.
+Ability values for waypoint-speed control rows use `Bench2Drive/tools/ability_benchmark.py` with a neutral fallback for Traffic Signs routes whose CARLA route interpolation does not expose a junction waypoint.
 
 ## Detailed Notes
 
@@ -60,7 +63,22 @@ Generated from `eval_results/Bench2Drive/**/res/merged.json` and `merged_ability
 - Temporal method: None
 - Notes: Checkpoint candidates around May 4 confirmed target_speed/angle heads and no motion modules.
 
+### 2026_06_17_11_32_36_simlingo_base_seed_42_dinov2_l14_batch64_resume_eval_bench2drive220/seed_42
+- Checkpoint: `outputs/2026_06_17_11_32_36_simlingo_base_seed_42_dinov2_l14_batch64_resume/checkpoints/last.ckpt`
+- Temporal method: DINOv2-L/14 current tokens plus K=8 motion tokens.
+- Notes: First DINOv2-L/14 full 220-route eval in the table.
+
+### 2026_06_20_20_24_52_simlingo_base_seed_42_dinov2_l14_safety_v13_finetune_10ep_eval_bench2drive220/seed_42
+- Checkpoint: `outputs/2026_06_20_20_24_52_simlingo_base_seed_42_dinov2_l14_safety_v13_finetune_10ep/checkpoints/last.ckpt`
+- Temporal method: DINOv2-L/14 current tokens plus K=16 motion tokens.
+- Notes: Safety-v13 finetune using target_speed + route control.
+
 ### 2026_06_20_20_24_52_simlingo_base_seed_42_dinov2_l14_safety_v13_finetune_10ep_waypoint_speed_seed42_eval_bench2drive220/seed_42
 - Checkpoint: `outputs/2026_06_20_20_24_52_simlingo_base_seed_42_dinov2_l14_safety_v13_finetune_10ep/checkpoints/last.ckpt`
 - Temporal method: DINOv2-L/14 current tokens plus K=16 learned motion tokens.
-- Notes: Same trained model as V5 safety finetune; eval overrides control to use 1D waypoint-derived desired speed instead of `target_speed`. This produced the best observed DS so far, but Traffic Signs ability is weak relative to target-speed runs.
+- Notes: Same trained model as V5 safety finetune; eval overrides control to use 1D waypoint-derived desired speed instead of `target_speed`.
+
+### 2026_06_20_20_24_52_simlingo_base_seed_42_dinov2_l14_safety_v13_finetune_10ep_waypoint_speed_seed42_eval_bench2drive220_rerun/seed_42
+- Checkpoint: `outputs/2026_06_20_20_24_52_simlingo_base_seed_42_dinov2_l14_safety_v13_finetune_10ep/checkpoints/last.ckpt`
+- Temporal method: DINOv2-L/14 current tokens plus K=16 learned motion tokens.
+- Notes: Same configuration as the waypoint-speed control ablation, rerun on 220 routes; highest observed DS so far.
