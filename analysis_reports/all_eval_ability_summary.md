@@ -3,6 +3,7 @@
 | Run | Stage | Encoder | Hist | Heads | Temporal | Motion Tokens | Control | DS | RC | Penalty | Perfect | Ability | Overtaking | Merging | Emergency Brake | Give Way | Traffic Signs |
 | --- | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | seed_2 | V0 Vanilla base | LLaVA-Next | 1 | 2D waypoint | No | No | Waypoint-derived speed | 74.7787 | 99.26 | 0.7499 | 105 | 0.4729 | 0.4667 | 0.4625 | 0.4667 | 0.4000 | 0.5684 |
+| baseline+1D/seed_2 | V0 Baseline + 1D | LLaVA-Next | 1 | 1D speed waypoint | No | No | waypoint-derived speed + route | 77.1208 | 99.92 | 0.7712 | 119 | N/A | N/A | N/A | N/A | N/A | N/A |
 | seed_1 | V0 Vanilla base | LLaVA-Next | 1 | 2D waypoint | No | No | Waypoint-derived speed | 75.9378 | 97.58 | 0.7760 | 104 | 0.4881 | 0.2667 | 0.4625 | 0.5167 | 0.5000 | 0.6947 |
 | 2026_05_13_13_24_08_simlingo_base_seed_42/seed_42 | V2 Temporal fusion | LLaVA-Next | 2 | 1D speed waypoint + target speed head | Yes, fused feature | No | target_speed + route | 76.7779 | 99.78 | 0.7679 | 116 | 0.5339 | 0.4667 | 0.5000 | 0.5500 | 0.5000 | 0.6526 |
 | 2026_05_23_00_30_24_simlingo_base_seed_42_finetune_10ep_1e-5_cosine_eval_stride5/seed_42 | V2 Temporal finetune stride5 | LLaVA-Next | 2 | 1D speed waypoint + target speed head | Yes, fused feature; eval t-5,t | No | target_speed + route | 77.5031 | 100.00 | 0.7750 | 119 | 0.5594 | 0.4889 | 0.5125 | 0.5167 | 0.6000 | 0.6789 |
@@ -20,6 +21,7 @@ Ability values for the waypoint-speed control rows were computed with `Bench2Dri
 ## Paths
 
 - `seed_2`: `/home/mediacore/simlingo/eval_results/Bench2Drive/seed_2/res/merged.json`
+- `baseline+1D/seed_2`: `/home/mediacore/simlingo/eval_results/Bench2Drive/baseline+1D/seed_2/res/merged.json`
 - `seed_1`: `/home/mediacore/simlingo/eval_results/Bench2Drive/seed_1/res/merged.json`
 - `2026_05_13_13_24_08_simlingo_base_seed_42/seed_42`: `/home/mediacore/simlingo/eval_results/Bench2Drive/2026_05_13_13_24_08_simlingo_base_seed_42/seed_42/res/merged.json`
 - `2026_05_23_00_30_24_simlingo_base_seed_42_finetune_10ep_1e-5_cosine_eval_stride5/seed_42`: `/home/mediacore/simlingo/eval_results/Bench2Drive/2026_05_23_00_30_24_simlingo_base_seed_42_finetune_10ep_1e-5_cosine_eval_stride5/seed_42/res/merged.json`
