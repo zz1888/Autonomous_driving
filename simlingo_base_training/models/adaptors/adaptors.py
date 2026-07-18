@@ -254,7 +254,7 @@ class DrivingAdaptor(nn.Module):
 
         if self.predict_control:
             label_target_speed = label.target_speed  # [B]
-            label_angle = label.angle * self.ANGLE_SCALE  # [B], scaled for magnitude alignment
+            label_angle = label.angle  # [B]
 
         current_index = 0
         loss_dict = {}
@@ -266,6 +266,8 @@ class DrivingAdaptor(nn.Module):
             if input_type in self.scalar_heads:
                 prediction = self.heads[input_type](features_tmp).squeeze(-1).squeeze(-1)  # [B]
                 loss = F.smooth_l1_loss(prediction, lbl, reduction="none")  # [B]
+                if input_type == "angle":
+                    loss = self.ANGLE_SCALE * loss
             elif input_type == 'speed_wps' and self.speed_wps_mode == '1d':
                 prediction = self._speed_wps_1d_forward(features_tmp)
                 loss = self._speed_wps_1d_loss(prediction, lbl)
