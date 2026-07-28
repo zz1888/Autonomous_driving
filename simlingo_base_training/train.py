@@ -47,6 +47,11 @@ def main(cfg: TrainConfig):
             ckpt = torch.load(cfg.checkpoint, map_location="cpu")
             # Lightning saves full checkpoint; extract state_dict if present
             state_dict = ckpt['state_dict'] if 'state_dict' in ckpt else ckpt
+        # Let a language model variant (e.g. OLMo2 GQA) remap incompatible
+        # weights (e.g. MHA k/v_proj -> GQA mean-pooled) before loading.
+        lm = getattr(model, "language_model", None)
+        if lm is not None and hasattr(lm, "convert_state_dict_for_loading"):
+            state_dict = lm.convert_state_dict_for_loading(state_dict)
         # Drop keys with shape mismatch so they get random init instead of crashing
         model_state = model.state_dict()
         filtered = {k: v for k, v in state_dict.items()

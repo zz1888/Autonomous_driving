@@ -61,10 +61,11 @@ def get_entry_point():
     return 'LingoAgent'
 
 
-DEBUG = False # saves images during evaluation
+DEBUG = True # saves images during evaluation
 HD_VIZ = False
 USE_UKF = True
 FORCE_WAYPOINT_SPEED = True
+DRAW_SPEED_WPS = False # if False, debug viz only draws the red route (and blue target point), no green speed waypoints
 
 class LingoAgent(autonomous_agent.AutonomousAgent):
     """
@@ -266,6 +267,8 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         if DEBUG:
             self.save_path_img = self.debug_save_path + '/images'
             Path(self.save_path_img).mkdir(parents=True, exist_ok=True)
+            self.save_path_raw_img = self.debug_save_path + '/raw_images'
+            Path(self.save_path_raw_img).mkdir(parents=True, exist_ok=True)
             
     def input_thread(self):
         while self.running:
@@ -324,6 +327,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         self._route_planner.set_route(self._global_plan, True)
         self.initialized = True
         self.metric_info = {}
+        self.speed_debug = {}
 
     def sensors(self):
         sensors = []
@@ -793,7 +797,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         # prepare velocity input
         gt_velocity = tick_data['speed']
 
-        if DEBUG and self.step%5 == 0:
+        if DEBUG:
             tvec = None
             rvec = None
 
@@ -811,6 +815,8 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
 
             # bgr to rgb
             self.camera_for_viz = cv2.cvtColor(self.camera_for_viz, cv2.COLOR_BGR2RGB)
+            raw_image = Image.fromarray(self.camera_for_viz)
+            raw_image.save(f"{self.save_path_raw_img}/{self.step}.png")
 
             # draw the predicted waypoints
             image = Image.fromarray(self.camera_for_viz)
@@ -827,7 +833,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
                 for points_2d in pred_route_img_coords:
                         draw.ellipse((points_2d[0]-3, points_2d[1]-3, points_2d[0]+3, points_2d[1]+3), fill=(255, 0, 0, 255))
             
-            if pred_speed_wps is not None:
+            if DRAW_SPEED_WPS and pred_speed_wps is not None:
                 pred_speed_wps_np = pred_speed_wps[0].detach().cpu().numpy()
                 if pred_speed_wps_np.shape[-1] == 2:
                     pred_speed_wps_img_coords = project_points(pred_speed_wps_np, camera_intrinsics, tvec=tvec, rvec=rvec)
@@ -890,6 +896,17 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             print(f"force_move: {self.force_move}")
 
         control = carla.VehicleControl(steer=float(steer), throttle=float(throttle), brake=float(brake))
+        control_debug = getattr(self, "last_control_debug", {}).copy()
+        current_speed = float(gt_velocity.detach().cpu().view(-1)[0].item())
+        control_debug.update({
+            "current_speed": current_speed,
+            "throttle": float(control.throttle),
+            "brake": bool(control.brake),
+            "steer": float(control.steer),
+            "force_move": int(self.force_move),
+            "stuck_detector": int(self.stuck_detector),
+        })
+        self.speed_debug[self.step] = control_debug
 
         # CARLA will not let the car drive in the initial frames.
         # We set the action to brake so that the filter does not get confused.
@@ -904,6 +921,9 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
                 outfile = open(f"{self.save_path_metric}/metric_info.json", 'w')
                 json.dump(self.metric_info, outfile, indent=4)
                 outfile.close()
+                outfile = open(f"{self.save_path_metric}/speed_debug.json", 'w')
+                json.dump(self.speed_debug, outfile, indent=4)
+                outfile.close()
 
         return control
 
@@ -917,7 +937,13 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         """
         assert route_waypoints.size(0) == 1
         route_waypoints = route_waypoints[0].data.cpu().numpy()
-        speed = velocity[0].data.cpu().numpy()
+        speed = float(velocity.detach().cpu().view(-1)[0].item())
+        pred_target_speed_value = (
+            float(pred_target_speed.detach().cpu().view(-1)[0].item())
+            if pred_target_speed is not None
+            else None
+        )
+        speed_waypoints_debug = None
 
         # --- Longitudinal control ---
         use_target_speed = (
@@ -930,6 +956,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         else:
             # Fallback: derive desired speed from speed waypoint distances
             speed_waypoints = speed_waypoints[0].data.cpu().numpy()
+            speed_waypoints_debug = speed_waypoints.tolist()
             dt = self.config.data_save_freq / self.config.carla_fps  # seconds per waypoint step
             if speed_waypoints.shape[-1] == 1:
                 progress = speed_waypoints[:, 0]
@@ -961,6 +988,15 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
 
         steer = np.clip(steer, -1.0, 1.0)
         steer = round(steer, 3)
+        self.last_control_debug = {
+            "desired_speed": float(desired_speed),
+            "pred_target_speed": pred_target_speed_value,
+            "use_target_speed": bool(use_target_speed),
+            "speed_wps": speed_waypoints_debug,
+            "raw_throttle": float(throttle),
+            "raw_brake": bool(brake),
+            "raw_steer": float(steer),
+        }
 
         return steer, throttle, brake
     

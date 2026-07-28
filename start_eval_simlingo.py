@@ -16,7 +16,7 @@ CHECKPOINT  = f"{REPO_ROOT}/outputs/2026_06_20_20_24_52_simlingo_base_seed_42_di
 ROUTE_PATH  = "/home/mediacore/simlingo/leaderboard/data/bench2drive_split"
 OUT_ROOT    = f"{REPO_ROOT}/eval_results/Bench2Drive"
 EVALUATOR   = f"{REPO_ROOT}/Bench2Drive/leaderboard/leaderboard/leaderboard_evaluator.py"
-EVAL_NAME   = Path(CHECKPOINT.split("+", 1)[0]).parents[1].name + "_waypoint_speed_seed42_eval_bench2drive220_rerun"
+EVAL_NAME   = "highest_dinov2_motion_1d_seed42_route001_video"
 
 SEED    = 42
 PORT    = 2000
@@ -24,8 +24,8 @@ TM_PORT = 8000
 TIMEOUT = 600
 MAX_RETRIES = 3
 MONITOR_INTERVAL = 1.0
-SKIP_COMPLETED = True
-ROUTE_IDS_TO_RUN = None
+SKIP_COMPLETED = False
+ROUTE_IDS_TO_RUN = {"001"}
 FATAL_PATTERNS = (
     "Signal 11 caught",
     "CommonUnixCrashHandler: Signal=11",
