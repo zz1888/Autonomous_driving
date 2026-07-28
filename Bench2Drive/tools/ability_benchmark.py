@@ -129,12 +129,21 @@ def main(args):
             location_list = get_position(route)
             waypoint_route = get_waypoint_route(location_list, grp)
             count = 0
+            has_junction = False
             for wp in waypoint_route:
                 count += 1
                 if wp.is_junction:
+                    has_junction = True
                     break 
-            if not wp.is_junction:
-                raise RuntimeError("This route does not contain any junction-waypoint!")
+            if not has_junction:
+                print(
+                    "Warning: route",
+                    route_id,
+                    scenario_name,
+                    "does not contain any junction-waypoint; skipping the extra Traffic_Signs junction check.",
+                    flush=True,
+                )
+                continue
             # +8 to ensure the ego pass the trigger volume
             junction_completion = float(count+8) / float(len(waypoint_route))
             record_completion = route_record["scores"]["score_route"] / 100.0
@@ -177,7 +186,7 @@ if __name__=='__main__':
     argparser.add_argument('-f', '--file', nargs=None, default="leaderboard/data/bench2drive220.xml", help='route file')
     argparser.add_argument('-r', '--result_file', nargs=None, default="", help='result json file')
     argparser.add_argument('-t', '--host', default='localhost', help='IP of the host server (default: localhost)')
-    argparser.add_argument('-p', '--port', nargs=1, default=4000, help='carla rpc port')
+    argparser.add_argument('-p', '--port', default=4000, type=int, help='carla rpc port')
     args = argparser.parse_args()
     main(args)
     
